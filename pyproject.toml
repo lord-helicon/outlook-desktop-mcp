@@ -27,7 +27,7 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/lord-helicon/outlook-desktop-mcp-plus"
 Repository = "https://github.com/lord-helicon/outlook-desktop-mcp-plus"
-Issues = "https://github.com/lord-helicon/outlook-desktop-mcp-plus/pulls"
+Issues = "https://github.com/lord-helicon/outlook-desktop-mcp-plus/issues"
 
 [project.scripts]
 outlook-desktop-mcp-plus = "outlook_desktop_mcp.entrypoint:main"
