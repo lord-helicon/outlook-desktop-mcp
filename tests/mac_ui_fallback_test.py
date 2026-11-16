@@ -144,6 +144,44 @@ def test_list_emails_uses_ui_fallback():
     check("ui-1-<fingerprint> returned", len(res) == 1 and res[0]["entry_id"] == f"ui-1-{FP}", str(res))
 
 
+# Real osascript text when the calling app lacks Accessibility permission.
+ACCESS_DENIED = ("AppleScript error: 80:96: execution error: System Events got an "
+                 "error: osascript is not allowed assistive access. (-25211)")
+
+
+def test_missing_accessibility_is_reported():
+    log("--- missing Accessibility permission is reported, not an empty list ---")
+    def handler(script):
+        if "System Events" in script:
+            raise RuntimeError(ACCESS_DENIED)
+        return ""  # AppleScript inbox is empty (New Outlook)
+    fake = FakeBridge(handler=handler)
+    server_mac.bridge = fake
+    out = asyncio.run(server_mac.list_emails(folder="inbox", count=5))
+    check("list_emails returns an error", out.startswith("Error listing emails:"), out[:120])
+    check("error names the Accessibility setting", "Privacy & Security > Accessibility" in out, out[:200])
+    ui_calls = [s for s in fake.scripts if "System Events" in s]
+    check("stops after the first denied layout", len(ui_calls) == 1, str(len(ui_calls)))
+
+    # Other UI failures (e.g. no Outlook window) still give the empty list.
+    def no_window(script):
+        if "System Events" in script:
+            raise RuntimeError("AppleScript error: Can't get window 1. (-1719)")
+        return ""
+    server_mac.bridge = FakeBridge(handler=no_window)
+    out = asyncio.run(server_mac.list_emails(folder="inbox", count=5))
+    check("other UI failures still return []", json.loads(out) == [], out[:120])
+
+    # Localised wording: the error number alone is enough.
+    check("detected by error number alone",
+          server_mac._is_ui_access_denied(RuntimeError("Fehler (-25211)")))
+
+    server_mac.bridge = FakeBridge(handler=handler)
+    res = json.loads(asyncio.run(server_mac.read_email(entry_id=f"ui-1-{FP}")))
+    check("read_email of a ui id names the setting",
+          "Privacy & Security > Accessibility" in res.get("error", ""), str(res)[:200])
+
+
 def test_fingerprint_ignores_read_state():
     log("--- row fingerprint survives read-state change, keeps positions ---")
     unread = asyncio.run(server_mac._ui_list_messages(
@@ -321,6 +359,7 @@ def main():
     test_layouts_generate_both_paths()
     test_list_falls_back_to_new_layout()
     test_list_emails_uses_ui_fallback()
+    test_missing_accessibility_is_reported()
     test_fingerprint_ignores_read_state()
     test_read_email_ui_id()
     test_read_email_numeric_still_works()

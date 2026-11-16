@@ -156,6 +156,26 @@ _UI_LAYOUTS = (
 )
 
 
+UI_ACCESS_DENIED_MESSAGE = (
+    "Outlook's mailbox is not visible to AppleScript (New Outlook keeps "
+    "Microsoft 365 mail in the cloud), and reading it from the Outlook window "
+    "needs macOS Accessibility permission, which is not granted. Open System "
+    "Settings > Privacy & Security > Accessibility, turn on the app that runs "
+    "this MCP server (for example Claude, or your terminal app), then restart "
+    "that app. Alternatively switch Outlook to Legacy Outlook."
+)
+
+
+def _is_ui_access_denied(error: BaseException) -> bool:
+    """True if System Events refused UI scripting (no Accessibility permission).
+
+    osascript reports this as error -25211 ("osascript is not allowed
+    assistive access"); the error number does not depend on the macOS language.
+    """
+    text = str(error)
+    return "-25211" in text or "assistive access" in text
+
+
 def _ui_scope(layout: dict, inner: str, *, pane: bool = False) -> str:
     """Wrap `inner` in nested System Events `tell` blocks for a layout.
 
@@ -204,6 +224,8 @@ async def _ui_list_messages(bridge_obj, count: int = 10) -> list[dict]:
             raw = await bridge_obj.run(_ui_scope(layout, rows_script))
             succeeded = True
         except Exception as e:  # wrong element path for this build -> try next
+            if _is_ui_access_denied(e):
+                raise  # no layout can work without Accessibility permission
             last_error = e
             continue
         if raw and raw.strip():
@@ -964,8 +986,11 @@ end tell'''
         if not results and folder.lower().strip() == "inbox":
             try:
                 results = await _ui_list_messages(bridge, count)
-            except Exception:
-                pass  # UI scraping failed — return empty list
+            except Exception as e:
+                if _is_ui_access_denied(e):
+                    return f"Error listing emails: {UI_ACCESS_DENIED_MESSAGE}"
+                # Other UI scraping failures (no window, unknown layout):
+                # keep returning the empty AppleScript result.
 
         return json.dumps(results, indent=2, default=str)
     except Exception as e:
@@ -1026,7 +1051,8 @@ async def read_email(
                     if "error" not in result:
                         result["entry_id"] = f"ui-{current}-{fingerprint}"
             except Exception as e:
-                result = {"error": f"Failed to read UI email: {e}"}
+                result = {"error": UI_ACCESS_DENIED_MESSAGE if _is_ui_access_denied(e)
+                          else f"Failed to read UI email: {e}"}
             if "error" in result:
                 return json.dumps(result)
             return json.dumps(result, indent=2, default=str)
