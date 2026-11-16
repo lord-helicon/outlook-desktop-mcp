@@ -30,6 +30,8 @@ class FakeBridge:
         self.fail_first_with = fail_first_with
 
     async def run(self, script, timeout=None):
+        if "count of exchange accounts" in script:
+            return "1"  # account check: Legacy Outlook / account present
         self.scripts.append(script)
         if self.fail_first_with and len(self.scripts) == 1:
             raise RuntimeError(self.fail_first_with)

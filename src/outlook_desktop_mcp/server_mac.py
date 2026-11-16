@@ -24,6 +24,7 @@ from outlook_desktop_mcp.utils.applescript_helpers import (
     format_date,
     parse_date,
     is_builtin_folder,
+    FOLDER_MAP,
     resolve_folder_ref,
     text_to_html,
     AS_DELIM,
@@ -267,35 +268,128 @@ def _is_ui_access_denied(error: BaseException) -> bool:
     return "-25211" in text or "assistive access" in text
 
 
-# Inbox names in the sidebar (the label is "<name>; N unread messages").
-_UI_INBOX_NAMES = {"inbox", "posteingang", "innboks", "inkorg", "indbakke",
-                   "boîte de réception", "bandeja de entrada", "posta in arrivo",
-                   "caixa de entrada", "postvak in", "skrzynka odbiorcza",
-                   "受信トレイ", "收件箱", "收件匣", "받은 편지함"}
+# Sidebar names of the standard folders in New Outlook, per language (the
+# label is "<name>; N unread messages"). Keys follow FOLDER_MAP's targets.
+_UI_FOLDER_ALIASES = {
+    "inbox": {"inbox", "posteingang", "innboks", "inkorg", "indbakke",
+              "boîte de réception", "bandeja de entrada", "posta in arrivo",
+              "caixa de entrada", "postvak in", "skrzynka odbiorcza",
+              "受信トレイ", "收件箱", "收件匣", "받은 편지함"},
+    "sent items": {"sent", "sent items", "sent mail", "gesendete elemente", "gesendet",
+                   "éléments envoyés", "elementos enviados", "posta inviata",
+                   "sendte elementer", "sendt", "skickat", "verzonden items"},
+    "drafts": {"drafts", "entwürfe", "brouillons", "borradores", "bozze",
+               "kladder", "utkast", "concepten"},
+    "deleted items": {"deleted items", "gelöschte elemente", "éléments supprimés",
+                      "elementos eliminados", "posta eliminata", "slettede elementer",
+                      "borttagna objekt", "verwijderde items"},
+    "junk mail": {"junk email", "junk e-mail", "junk", "junk-e-mail", "spam",
+                  "courrier indésirable", "correo no deseado", "posta indesiderata",
+                  "søppelpost", "skräppost", "ongewenste e-mail"},
+    "outbox": {"outbox", "postausgang", "boîte d'envoi", "bandeja de salida",
+               "posta in uscita", "utboks", "utkorgen", "postvak uit"},
+    "archive": {"archive", "archiv", "archives", "archivo", "archivio", "arkiv", "archief"},
+}
+_UI_INBOX_NAMES = _UI_FOLDER_ALIASES["inbox"]
+_UI_SIDEBAR = "outline 1 of scroll area 1 of splitter group 1 of window 1"
+# Seconds for the message list to load after selecting a folder.
+_UI_FOLDER_SETTLE_SECONDS = 1.2
 
 
 class UIWrongFolderError(RuntimeError):
-    """The Outlook window shows a folder other than the Inbox."""
+    """The requested folder can't be shown in the Outlook window."""
 
 
-async def _ui_selected_folder(bridge_obj) -> str | None:
-    """Name of the folder selected in Outlook's sidebar, or None if unreadable."""
+class UIUnavailableError(RuntimeError):
+    """The Outlook window can't be used for this request (unknown layout)."""
+
+
+def _ui_folder_names(folder: str) -> set[str]:
+    """Sidebar names that count as `folder` (lower-case)."""
+    key = (folder or "inbox").strip().lower()
+    key = FOLDER_MAP.get(key, key)
+    return _UI_FOLDER_ALIASES.get(key, set()) | {key}
+
+
+def _ui_label_name(label: str) -> str:
+    """'Inbox; 1 unread messages' -> 'Inbox'."""
+    return re.split(r"[;,]", label or "", maxsplit=1)[0].strip()
+
+
+async def _ui_sidebar(bridge_obj) -> list[tuple[int, str, bool]] | None:
+    """(row number, folder name, selected) for each sidebar row; None if unreadable."""
     script = (
         'tell application "System Events" to tell process "Microsoft Outlook"\n'
-        '    set o to outline 1 of scroll area 1 of splitter group 1 of window 1\n'
-        '    repeat with r in (every row of o whose selected is true)\n'
-        '        return my sf(description of UI element 1 of r)\n'
+        f'    set o to {_UI_SIDEBAR}\n'
+        '    set out to ""\n'
+        '    repeat with i from 1 to (count of rows of o)\n'
+        '        set r to row i of o\n'
+        '        set d to ""\n'
+        '        try\n'
+        '            set d to description of UI element 1 of r\n'
+        '        end try\n'
+        f'        set out to out & i & {AS_DELIM} & my sf(d) & {AS_DELIM} & (selected of r) & {AS_RECORD_DELIM}\n'
         '    end repeat\n'
-        'end tell\n'
-        'return ""'
+        '    return out\n'
+        'end tell'
     )
     try:
-        label = (await bridge_obj.run(script)).strip()
+        raw = await bridge_obj.run(script)
     except Exception as e:
         if _is_ui_access_denied(e):
             raise
-        return None  # other layout: can't tell, don't block
-    return re.split(r"[;,]", label, 1)[0].strip() or None
+        return None  # other layout: can't tell
+    rows = []
+    for rec in raw.split(RECORD_DELIM):
+        parts = rec.split(DELIM)
+        if len(parts) == 3 and parts[0].strip().isdigit():
+            rows.append((int(parts[0]), _ui_label_name(parts[1]), parts[2].strip() == "true"))
+    return rows or None
+
+
+async def _ui_select_sidebar_row(bridge_obj, row: int) -> None:
+    await bridge_obj.run(
+        'tell application "System Events" to tell process "Microsoft Outlook"\n'
+        f'    select row {int(row)} of {_UI_SIDEBAR}\n'
+        'end tell'
+    )
+
+
+async def _ui_in_folder(bridge_obj, folder: str, action):
+    """Run `action()` while the Outlook window shows `folder`.
+
+    New Outlook can only be read through its window, which shows one folder at
+    a time. If another folder is selected, select `folder` in the sidebar, run
+    the action, then select the previous folder again. If the sidebar can't be
+    read (other layout), only the Inbox is attempted, as before.
+    """
+    names = _ui_folder_names(folder)
+    side = await _ui_sidebar(bridge_obj)
+    if side is None:
+        if names & _UI_INBOX_NAMES:
+            return await action()
+        raise UIUnavailableError(
+            f"Can't read Outlook's folder list, so the folder '{folder}' can't be opened."
+        )
+    current = next((r for r in side if r[2]), None)
+    if current and current[1].lower() in names:
+        return await action()
+    target = next((r for r in side if r[1].lower() in names), None)
+    if target is None:
+        raise UIWrongFolderError(
+            f"Outlook's folder list has no folder '{folder}'. If it is a subfolder, "
+            "expand its parent folder in Outlook first."
+        )
+    await _ui_select_sidebar_row(bridge_obj, target[0])
+    await asyncio.sleep(_UI_FOLDER_SETTLE_SECONDS)
+    try:
+        return await action()
+    finally:
+        if current:
+            try:
+                await _ui_select_sidebar_row(bridge_obj, current[0])
+            except Exception:
+                pass  # best effort: leave the folder that was read selected
 
 
 # Extra rows read per list: date group headers ("Today", ...) are rows too.
@@ -324,19 +418,11 @@ def _ui_scope(layout: dict, inner: str, *, pane: bool = False) -> str:
 
 
 async def _ui_list_messages(bridge_obj, count: int = 10, unread_only: bool = False) -> list[dict]:
-    """Read visible inbox messages via UI scripting (System Events).
+    """Read the message list shown in the Outlook window (System Events).
 
-    This is the fallback for New Outlook for Mac where AppleScript's inbox
-    keyword only sees the empty local mailbox.
+    The fallback for New Outlook for Mac, whose mailbox AppleScript can't see.
+    Reads whatever folder the window shows; use _ui_in_folder to pick one.
     """
-    # The window shows whichever folder is selected; only the Inbox is wanted.
-    selected = await _ui_selected_folder(bridge_obj)
-    if selected and selected.lower() not in _UI_INBOX_NAMES:
-        raise UIWrongFolderError(
-            f"The Outlook window shows the folder '{selected}', not the Inbox, and "
-            "New Outlook can only be read through the window. Select the Inbox in "
-            "Outlook and try again."
-        )
     # Read a few extra rows: date group headers take up rows too.
     max_rows = count + _UI_HEADER_ALLOWANCE
     if unread_only:
@@ -510,36 +596,70 @@ async def _ui_resolve_row(bridge_obj, row_number: int, fingerprint: str) -> int 
         return None
     return min(matches, key=lambda n: abs(n - row_number))
 
-async def _ui_search_inbox(query: str, count: int) -> list[dict] | None:
-    """Window-read inbox rows whose subject or sender name contains `query`.
+async def _no_visible_accounts() -> bool:
+    """True if Outlook reports no Exchange/IMAP/POP account (New Outlook)."""
+    try:
+        return (await bridge.run(_ACCOUNT_COUNT_SCRIPT)).strip() == "0"
+    except Exception:
+        return False
 
-    Scans the first _UI_LOOKUP_ROWS rows. Returns None if the window could not
-    be read; a missing Accessibility permission is raised to the caller.
+
+def _ui_matching(rows: list[dict], query: str) -> list[dict]:
+    q = (query or "").strip().lower()
+    return [r for r in rows if q in r["subject"].lower() or q in r["sender_name"].lower()]
+
+
+async def _ui_mail_result(verb: str, folder: str, rows_fn) -> str | None:
+    """Run rows_fn while the window shows `folder`; JSON rows or an error text.
+
+    None means the window can't be used (unknown layout): the caller falls
+    back to its AppleScript result.
     """
     try:
-        rows = await _ui_list_messages(bridge, _UI_LOOKUP_ROWS)
+        rows = await _ui_in_folder(bridge, folder, rows_fn)
+    except UIWrongFolderError as e:
+        return f"Error {verb}: {e}"
     except Exception as e:
-        if _is_ui_access_denied(e) or isinstance(e, UIWrongFolderError):
-            raise
+        if _is_ui_access_denied(e):
+            return f"Error {verb}: {UI_ACCESS_DENIED_MESSAGE}"
         return None
-    q = (query or "").strip().lower()
-    hits = [r for r in rows if q in r["subject"].lower() or q in r["sender_name"].lower()]
-    return hits[:count]
+    return json.dumps(rows, indent=2, default=str)
+
+
+async def _ui_search_result(folder: str, query: str, count: int) -> str | None:
+    async def rows_fn():
+        return _ui_matching(await _ui_list_messages(bridge, _UI_LOOKUP_ROWS), query)[:count]
+    return await _ui_mail_result("searching emails", folder, rows_fn)
 
 
 async def _inbox_search_result(results: list, folder: str, query: str, count: int) -> str:
-    """search_emails result; for an empty New Outlook inbox, search the window."""
+    """search_emails result; for an empty AppleScript inbox, search the window."""
     if results or (folder or "").lower().strip() != "inbox":
         return await _results_json(results, "matching emails")
+    out = await _ui_search_result("inbox", query, count)
+    return out if out is not None else await _results_json(results, "matching emails")
+
+
+async def _ui_read_by_subject(folder: str, subject_search: str) -> str | None:
+    """read_email(subject_search) through the window; None if it can't be used."""
+    async def action():
+        hits = _ui_matching(await _ui_list_messages(bridge, _UI_LOOKUP_ROWS), subject_search)
+        if not hits:
+            return {"error": f"No email found matching '{subject_search}'"}
+        m = _UI_ID_RE.fullmatch(hits[0]["entry_id"])
+        result = await _ui_read_email_by_row(bridge, int(m.group(1)))
+        if "error" not in result:
+            result["entry_id"] = hits[0]["entry_id"]
+        return result
     try:
-        hits = await _ui_search_inbox(query, count)
+        result = await _ui_in_folder(bridge, folder, action)
     except UIWrongFolderError as e:
-        return f"Error searching emails: {e}"
-    except Exception:
-        return f"Error searching emails: {UI_ACCESS_DENIED_MESSAGE}"
-    if hits is None:
-        return await _results_json(results, "matching emails")
-    return json.dumps(hits, indent=2, default=str)
+        return json.dumps({"error": str(e)})
+    except Exception as e:
+        if _is_ui_access_denied(e):
+            return json.dumps({"error": UI_ACCESS_DENIED_MESSAGE})
+        return None
+    return json.dumps(result, indent=2, default=str)
 
 
 _UI_READ_PANE_SCRIPT = """set emailSubject to ""
@@ -1069,6 +1189,9 @@ async def list_emails(
         folder: The folder to list. Case-insensitive names: "inbox" (default),
             "sent"/"sentmail", "drafts", "deleted"/"trash", "junk"/"spam",
             "outbox", or any custom folder name visible in list_folders output.
+            In New Outlook the folder is read from the Outlook window: if
+            another folder is shown, it is selected in the sidebar for the
+            read and the previous folder is selected again afterwards.
         count: Maximum number of emails to return. Default 10, max recommended 50.
         unread_only: If true, only return unread emails. Default false.
             In New Outlook (inbox read from the window) only the first 50
@@ -1079,6 +1202,13 @@ async def list_emails(
     """
     if err := _bad_count("count", count):
         return err
+    # New Outlook: AppleScript sees no account, so read the folder through the
+    # window (selecting it in the sidebar if needed, then switching back).
+    if await _no_visible_accounts():
+        out = await _ui_mail_result(
+            "listing emails", folder, lambda: _ui_list_messages(bridge, count, unread_only))
+        if out is not None:
+            return out
     folder_ref = resolve_folder_ref(folder)
     unread_filter = ' whose is read is false' if unread_only else ''
 
@@ -1196,19 +1326,13 @@ end tell'''
         # Fallback: New Outlook for Mac keeps Exchange messages outside the
         # AppleScript-visible mailbox. If the standard query returned nothing
         # for the inbox, try reading the visible message list via UI scripting.
+        # The window was read, so an empty list is a real answer (e.g. no
+        # unread mail). Unknown layouts fall through to the AppleScript result.
         if not results and folder.lower().strip() == "inbox":
-            try:
-                results = await _ui_list_messages(bridge, count, unread_only)
-                # The window was read, so an empty list is a real answer
-                # (e.g. no unread mail), not a sign of a hidden mailbox.
-                return json.dumps(results, indent=2, default=str)
-            except Exception as e:
-                if _is_ui_access_denied(e):
-                    return f"Error listing emails: {UI_ACCESS_DENIED_MESSAGE}"
-                if isinstance(e, UIWrongFolderError):
-                    return f"Error listing emails: {e}"
-                # Other UI scraping failures (no window, unknown layout):
-                # keep returning the empty AppleScript result.
+            out = await _ui_mail_result(
+                "listing emails", "inbox", lambda: _ui_list_messages(bridge, count, unread_only))
+            if out is not None:
+                return out
 
         return await _results_json(results, "emails")
     except Exception as e:
@@ -1236,8 +1360,9 @@ async def read_email(
             a specific email. Get this from list_emails or search_emails results.
         subject_search: Alternative to entry_id. A case-insensitive substring
             to search for in email subjects. Returns the most recent match.
-        folder: Folder to search when using subject_search. Ignored when
-            entry_id is provided. Default "inbox".
+        folder: Folder to search when using subject_search, and, for ui-N ids
+            from New Outlook, the folder the id was listed from. Default "inbox".
+            Ignored for numeric entry_ids.
 
     Returns:
         JSON object with full email details (entry_id, subject, sender,
@@ -1256,18 +1381,21 @@ async def read_email(
                     f"'{entry_id}' has no row fingerprint, so it could open the "
                     "wrong message. Call list_emails again and use the new id."
                 )})
-            try:
+            async def read_row():
                 current = await _ui_resolve_row(bridge, row_number, fingerprint)
                 if current is None:
-                    result = {"error": (
+                    return {"error": (
                         f"The message for '{entry_id}' is no longer in the first "
-                        f"{max(row_number, _UI_LOOKUP_ROWS)} rows of the message "
-                        "list. Call list_emails again."
+                        f"{max(row_number, _UI_LOOKUP_ROWS)} rows of the '{folder}' "
+                        "message list. Call list_emails again (with the same folder)."
                     )}
-                else:
-                    result = await _ui_read_email_by_row(bridge, current)
-                    if "error" not in result:
-                        result["entry_id"] = f"ui-{current}-{fingerprint}"
+                res = await _ui_read_email_by_row(bridge, current)
+                if "error" not in res:
+                    res["entry_id"] = f"ui-{current}-{fingerprint}"
+                return res
+            try:
+                # ui ids are rows of the folder they were listed from.
+                result = await _ui_in_folder(bridge, folder, read_row)
             except Exception as e:
                 result = {"error": UI_ACCESS_DENIED_MESSAGE if _is_ui_access_denied(e)
                           else str(e) if isinstance(e, UIWrongFolderError)
@@ -1317,6 +1445,10 @@ async def read_email(
     return my sf(mid) & {AS_DELIM} & my sf(msubject) & {AS_DELIM} & my sf(msender) & {AS_DELIM} & my sf(msenderName) & {AS_DELIM} & my sf(mtime) & {AS_DELIM} & my sf(misread) & {AS_DELIM} & my sf(mattcount) & {AS_DELIM} & my sf(mto) & {AS_DELIM} & my sf(mcc) & {AS_DELIM} & my sf(mbody)
 end tell'''
     elif subject_search:
+        if await _no_visible_accounts():
+            out = await _ui_read_by_subject(folder, subject_search)
+            if out is not None:
+                return out
         folder_ref = resolve_folder_ref(folder)
         safe_query = escape(subject_search)
         script = f'''tell application "Microsoft Outlook"
@@ -1366,21 +1498,11 @@ end tell'''
     try:
         raw = await bridge.run(script)
         if raw == "NOT_FOUND":
-            # New Outlook: the AppleScript inbox is empty; look in the window.
+            # Empty AppleScript inbox: look in the window.
             if subject_search and (folder or "").lower().strip() == "inbox":
-                try:
-                    hits = await _ui_search_inbox(subject_search, 1)
-                except UIWrongFolderError as e:
-                    return json.dumps({"error": str(e)})
-                except Exception:
-                    return json.dumps({"error": UI_ACCESS_DENIED_MESSAGE})
-                if hits:
-                    m = _UI_ID_RE.fullmatch(hits[0]["entry_id"])
-                    result = await _ui_read_email_by_row(bridge, int(m.group(1)))
-                    if "error" in result:
-                        return json.dumps(result)
-                    result["entry_id"] = hits[0]["entry_id"]
-                    return json.dumps(result, indent=2, default=str)
+                out = await _ui_read_by_subject("inbox", subject_search)
+                if out is not None:
+                    return out
             return json.dumps({"error": f"No email found matching '{subject_search}'"})
 
         parts = raw.split(DELIM, 9)  # max 10 parts
@@ -1817,6 +1939,10 @@ async def search_emails(
     """
     if err := _bad_count("count", count):
         return err
+    if await _no_visible_accounts():
+        out = await _ui_search_result(folder, query, count)
+        if out is not None:
+            return out
     folder_ref = resolve_folder_ref(folder)
     safe_query = escape(query)
 

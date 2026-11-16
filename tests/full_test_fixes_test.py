@@ -8,6 +8,7 @@ Run: python tests/full_test_fixes_test.py
 import asyncio
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -21,6 +22,7 @@ from outlook_desktop_mcp.utils.applescript_helpers import (  # noqa: E402
 )
 from outlook_desktop_mcp.utils.output import set_server_version  # noqa: E402
 
+server_mac._UI_FOLDER_SETTLE_SECONDS = 0  # no waiting in tests
 passed = total = 0
 
 
@@ -38,13 +40,26 @@ class Fake:
     """Fake bridge: `accounts` answers the account-count script; `handler`
     (if given) answers everything else, otherwise `out`."""
 
-    def __init__(self, accounts="1", out="", handler=None, folder="Inbox; 0 unread messages"):
+    def __init__(self, accounts="1", out="", handler=None,
+                 sidebar=("Inbox; 0 unread messages",), selected=1):
         self.accounts, self.out, self.handler, self.scripts = accounts, out, handler, []
-        self.folder = folder
+        self.sidebar, self.selected, self.sidebar_calls = sidebar, selected, []
+
+    def selects(self):
+        return [int(m.group(1)) for x in self.sidebar_calls
+                for m in [re.search(r"select row (\d+) of outline", x)] if m]
 
     async def run(self, script, timeout=None):
-        if "outline 1 of scroll area 1" in script:
-            return self.folder  # sidebar folder check
+        if "outline 1 of scroll area 1" in script:  # sidebar
+            self.sidebar_calls.append(script)
+            m = re.search(r"select row (\d+) of outline", script)
+            if m:
+                self.selected = int(m.group(1))
+                return ""
+            if self.sidebar is None:
+                raise RuntimeError("AppleScript error: Invalid index. (-1719)")
+            return "".join(f"{i}{DELIM}{label}{DELIM}{'true' if i == self.selected else 'false'}{RECORD_DELIM}"
+                           for i, label in enumerate(self.sidebar, 1))
         self.scripts.append(script)
         if "count of exchange accounts" in script:
             return self.accounts
@@ -200,17 +215,61 @@ def test_inbox_search_via_window():
     check("read_email by subject reads the matching row", res.get("entry_id", "").startswith("ui-1-"), str(res)[:150])
 
 
-def test_wrong_folder_and_has_files():
-    print("--- window shows another folder -> clear error; 'Has files' = attachment ---")
-    server_mac.bridge = Fake(accounts="0", handler=ui_handler(), folder="Sent Items; 0 unread messages")
+SIDEBAR = ("Favorites", "Inbox; 1 unread messages", "Archive", "Drafts", "Sent", "Deleted Items")
+
+
+def test_folder_switching():
+    print("--- New Outlook: other folders are selected in the sidebar, then restored ---")
+    fake = Fake(accounts="0", handler=ui_handler(), sidebar=SIDEBAR, selected=2)
+    server_mac.bridge = fake
+    res = json.loads(call(server_mac.list_emails(folder="sent", count=5)))
+    check("sent read through the window", len(res) == 2, str(res)[:100])
+    check("Sent selected, then Inbox again", fake.selects() == [5, 2], str(fake.selects()))
+    check("selection restored", fake.selected == 2)
+
+    fake = Fake(accounts="0", handler=ui_handler(), sidebar=SIDEBAR, selected=2)
+    server_mac.bridge = fake
+    call(server_mac.list_emails(count=5))
+    check("inbox already shown: no switching", fake.selects() == [], str(fake.selects()))
+
+    fake = Fake(accounts="0", handler=ui_handler(), sidebar=SIDEBAR, selected=5)
+    server_mac.bridge = fake
+    call(server_mac.list_emails(folder="inbox", count=5))
+    check("Sent shown, inbox wanted: switch and restore", fake.selects() == [2, 5], str(fake.selects()))
+
+    fake = Fake(accounts="0", handler=ui_handler(), sidebar=SIDEBAR, selected=2)
+    server_mac.bridge = fake
+    out = call(server_mac.list_emails(folder="Nope", count=5))
+    check("unknown folder: clear error", out.startswith("Error listing emails: Outlook's folder list has no folder 'Nope'"), out[:120])
+    check("unknown folder: nothing selected", fake.selects() == [])
+
+    fake = Fake(accounts="0", handler=ui_handler(), sidebar=("Posteingang; 2 ungelesene Nachrichten", "Gesendete Elemente"), selected=2)
+    server_mac.bridge = fake
+    call(server_mac.list_emails(folder="inbox", count=5))
+    check("German names: Posteingang selected for inbox", fake.selects() == [1, 2], str(fake.selects()))
+
+    fake = Fake(accounts="0", handler=ui_handler(), sidebar=SIDEBAR, selected=2)
+    server_mac.bridge = fake
+    res = json.loads(call(server_mac.search_emails(query="lunch", folder="archive")))
+    check("search in Archive switches and restores", fake.selects() == [3, 2] and len(res) == 1, str(fake.selects()))
+
+    pane = DELIM.join(["Lunch", "Bob", "Mon 11:00", "me", "Body text"])
+    fake = Fake(accounts="0", handler=ui_handler(pane), sidebar=SIDEBAR, selected=2)
+    server_mac.bridge = fake
+    fp = server_mac._ui_fingerprint("Bob", "Lunch", "11:00")
+    res = json.loads(call(server_mac.read_email(entry_id=f"ui-2-{fp}", folder="sent")))
+    check("read_email ui id in Sent", res.get("subject") == "Lunch" and fake.selects() == [5, 2], str(res)[:100] + str(fake.selects()))
+
+    fake = Fake(accounts="0", handler=ui_handler(), sidebar=None)
+    server_mac.bridge = fake
+    out = call(server_mac.list_emails(folder="sent", count=5))
+    check("sidebar unreadable: falls back to the AppleScript result", "Legacy Outlook" in out or out.strip() == "[]", out[:100])
     out = call(server_mac.list_emails(count=5))
-    check("list_emails refuses another folder", out.startswith("Error listing emails: The Outlook window shows the folder 'Sent Items'"), out[:120])
-    out = call(server_mac.search_emails(query="x"))
-    check("search_emails refuses another folder", "not the Inbox" in out, out[:120])
-    server_mac.bridge = Fake(accounts="0", handler=ui_handler(), folder="Posteingang; 2 ungelesene Nachrichten")
-    check("German Inbox name accepted", isinstance(json.loads(call(server_mac.list_emails(count=5))), list))
-    server_mac.bridge = Fake(accounts="0", handler=ui_handler(), folder="")
-    check("unreadable sidebar does not block", isinstance(json.loads(call(server_mac.list_emails(count=5))), list))
+    check("sidebar unreadable: inbox still read", len(json.loads(out)) == 2, out[:100])
+
+
+def test_has_files_marker():
+    print("--- 'Has files' marks an attachment ---")
     row = "Carol, Contract,    09:00,    Has files,    preview text,"
     fake = Fake(handler=lambda s: row + RECORD_DELIM if "set rowCount" in s else "")
     res = call(server_mac._ui_list_messages(fake, 5))
@@ -250,7 +309,8 @@ if __name__ == "__main__":
     test_task_priority_clean()
     test_friendly_errors()
     test_inbox_search_via_window()
-    test_wrong_folder_and_has_files()
+    test_folder_switching()
+    test_has_files_marker()
     test_batched_rows_script()
     test_server_version()
     print("=" * 50)
