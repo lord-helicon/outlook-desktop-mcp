@@ -146,13 +146,17 @@ async def _run_with_fallback(fast_script: str, legacy_script: str) -> str:
 
 # Element chains from `window 1` down to the message table. The layout
 # differs between Outlook builds: New Outlook has four nested splitter groups
-# and an extra `UI element` wrapper; older builds have three and no wrapper.
+# and an extra `UI element` wrapper; older builds have three and no wrapper;
+# 16.115 has three and no scroll area around the table.
 # These are System Events class names (not localized UI strings), so they do
 # not depend on the macOS language. Each variant is tried in order.
 _UI_LAYOUTS = (
-    # (splitter group depth, wrapper elements between `group 1` and the table)
-    {"name": "new", "splitters": 4, "wrappers": ("UI element 1",)},
-    {"name": "legacy", "splitters": 3, "wrappers": ()},
+    # splitters: splitter group depth; wrappers: elements between `group 1` and
+    # the table; scroll: whether the table sits in `scroll area 1`.
+    {"name": "new", "splitters": 4, "wrappers": ("UI element 1",), "scroll": True},
+    {"name": "legacy", "splitters": 3, "wrappers": (), "scroll": True},
+    # Outlook 16.115 (New Outlook): the table is a direct child of `group 1`.
+    {"name": "flat", "splitters": 3, "wrappers": (), "scroll": False},
 )
 
 
@@ -176,6 +180,10 @@ def _is_ui_access_denied(error: BaseException) -> bool:
     return "-25211" in text or "assistive access" in text
 
 
+# Extra rows read per list: date group headers ("Today", ...) are rows too.
+_UI_HEADER_ALLOWANCE = 5
+
+
 def _ui_scope(layout: dict, inner: str, *, pane: bool = False) -> str:
     """Wrap `inner` in nested System Events `tell` blocks for a layout.
 
@@ -187,7 +195,10 @@ def _ui_scope(layout: dict, inner: str, *, pane: bool = False) -> str:
              "window 1"]
     chain += ["splitter group 1"] * layout["splitters"]
     if not pane:
-        chain += ["group 1", *layout["wrappers"], "scroll area 1", "table 1"]
+        chain += ["group 1", *layout["wrappers"]]
+        if layout.get("scroll", True):
+            chain.append("scroll area 1")
+        chain.append("table 1")
     lines = [f"tell {c}" for c in chain] + [inner] + ["end tell"] * len(chain)
     return "\n".join(lines)
 
@@ -198,11 +209,13 @@ async def _ui_list_messages(bridge_obj, count: int = 10) -> list[dict]:
     This is the fallback for New Outlook for Mac where AppleScript's inbox
     keyword only sees the empty local mailbox.
     """
+    # Read a few extra rows: date group headers take up rows too.
+    max_rows = count + _UI_HEADER_ALLOWANCE
     rows_script = (
         'set rowList to rows\n'
         'set rowCount to count of rowList\n'
         'set maxRows to rowCount\n'
-        f'if maxRows > {count} then set maxRows to {count}\n'
+        f'if maxRows > {max_rows} then set maxRows to {max_rows}\n'
         'set output to ""\n'
         'repeat with i from 1 to maxRows\n'
         '    set r to row i\n'
@@ -244,6 +257,10 @@ async def _ui_list_messages(bridge_obj, count: int = 10) -> list[dict]:
         # separators, while in-content commas have 0-1 trailing spaces.
         # Structure: [UNREAD_FLAG,]    SENDER, SUBJECT,     TIME,    [FLAGS,]
         fields = [f.strip() for f in re.split(r",\s{4,}", record)]
+        if len(fields) < 2:
+            # Date group headers ("Today", "Last week", ...) are rows too, but
+            # have no wide-gap fields. Skip them; idx stays the real row number.
+            continue
 
         is_unread = False
         has_attachment = False
@@ -306,7 +323,7 @@ async def _ui_list_messages(bridge_obj, count: int = 10) -> list[dict]:
             "_source": "ui_scraping",
         })
 
-    return results
+    return results[:count]
 
 
 _UI_PANE_SETTLE_SECONDS = 1.5

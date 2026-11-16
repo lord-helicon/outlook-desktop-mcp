@@ -62,7 +62,13 @@ def is_new_layout(script):
 
 
 def is_legacy_layout(script):
-    return script.count("tell splitter group 1") == 3 and "tell UI element 1" not in script
+    return (script.count("tell splitter group 1") == 3 and "tell UI element 1" not in script
+            and "tell scroll area 1\ntell table 1" in script)
+
+
+# Outlook 16.115: 3 splitter groups, table directly under group 1.
+def is_flat_layout(script):
+    return script.count("tell splitter group 1") == 3 and "tell group 1\ntell table 1" in script
 
 
 ROW = "Alice, Hello world,    10:00,"
@@ -91,6 +97,40 @@ def test_layouts_generate_both_paths():
           leg.count("tell splitter group 1") == 3
           and "tell group 1\ntell scroll area 1\ntell table 1" in leg, leg)
     check("tells balanced", new.count("tell ") == new.count("end tell"))
+    flat = server_mac._ui_scope(server_mac._UI_LAYOUTS[2], "X")
+    check("flat (16.115): 3 splitters, table directly under group 1",
+          flat.count("tell splitter group 1") == 3 and "tell group 1\ntell table 1" in flat
+          and "scroll area" not in flat, flat)
+    pane = server_mac._ui_scope(server_mac._UI_LAYOUTS[2], "X", pane=True)
+    check("flat pane stops at the innermost splitter group",
+          pane.count("tell splitter group 1") == 3 and "tell group 1" not in pane, pane)
+
+
+def test_flat_layout_used_when_others_fail():
+    log("--- 16.115 layout is used when the older layouts don't match ---")
+    def flat_only(script):
+        if "System Events" in script and not is_flat_layout(script):
+            raise RuntimeError("AppleScript error: Invalid index. (-1719)")
+        return ROW + RECORD_DELIM if "System Events" in script else ""
+    fake = FakeBridge(handler=flat_only)
+    res = asyncio.run(server_mac._ui_list_messages(fake, 5))
+    check("row read through the flat layout", len(res) == 1 and res[0]["entry_id"] == f"ui-1-{FP}", str(res))
+    check("tried new, legacy, then flat", len(fake.scripts) == 3 and is_flat_layout(fake.scripts[-1]))
+    server_mac.bridge = FakeBridge(handler=flat_only)
+    res = json.loads(asyncio.run(server_mac.list_emails(folder="inbox", count=5)))
+    check("list_emails returns the row", len(res) == 1, str(res))
+
+
+def test_date_group_headers_skipped():
+    log("--- date group header rows are skipped, row numbers kept ---")
+    raw = "Today, Monday" + RECORD_DELIM + ROW + RECORD_DELIM + "Last week" + RECORD_DELIM + \
+          "     " + row("Bob", "Re: plan") + RECORD_DELIM
+    fake = FakeBridge(handler=lambda s: raw if "System Events" in s else "")
+    res = asyncio.run(server_mac._ui_list_messages(fake, 10))
+    ids = [r["entry_id"].split("-")[1] for r in res]
+    check("only the 2 messages returned", len(res) == 2, str(res))
+    check("entry ids keep the real row numbers (2 and 4)", ids == ["2", "4"], str(ids))
+    check("leading spaces don't break the sender", res[1]["sender_name"] == "Bob", str(res[1]))
 
 
 def test_list_falls_back_to_new_layout():
@@ -358,6 +398,8 @@ def test_numeric_ids_still_work():
 def main():
     test_layouts_generate_both_paths()
     test_list_falls_back_to_new_layout()
+    test_flat_layout_used_when_others_fail()
+    test_date_group_headers_skipped()
     test_list_emails_uses_ui_fallback()
     test_missing_accessibility_is_reported()
     test_fingerprint_ignores_read_state()
