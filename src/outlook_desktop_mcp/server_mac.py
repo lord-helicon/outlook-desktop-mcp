@@ -202,7 +202,7 @@ async def _run_with_fallback(fast_script: str, legacy_script: str) -> str:
 # the message list table visible in the Outlook window.
 
 
-# Element chains from `window 1` down to the message table. The layout
+# Element chains from the main window down to the message table. The layout
 # differs between Outlook builds: New Outlook has four nested splitter groups
 # and an extra `UI element` wrapper; older builds have three and no wrapper;
 # 16.115 has three and no scroll area around the table.
@@ -293,7 +293,21 @@ _UI_FOLDER_ALIASES = {
     "archive": ("archive", "archiv", "archives", "archivo", "archivio", "arkiv", "archief"),
 }
 _UI_INBOX_NAMES = set(_UI_FOLDER_ALIASES["inbox"])
-_UI_SIDEBAR = "outline 1 of scroll area 1 of splitter group 1 of window 1"
+# Outlook's front window is not always the main window: a reminder, an open
+# message or a notification can be in front. Every window script first finds
+# the main window (the one with splitter groups) and refers to it by index.
+_UI_MAIN_WINDOW_PREAMBLE = (
+    'set mainWinIdx to 1\n'
+    'tell application "System Events" to tell process "Microsoft Outlook"\n'
+    '    repeat with i from 1 to (count of windows)\n'
+    '        if (count of splitter groups of window i) > 0 then\n'
+    '            set mainWinIdx to i\n'
+    '            exit repeat\n'
+    '        end if\n'
+    '    end repeat\n'
+    'end tell\n'
+)
+_UI_SIDEBAR = "outline 1 of scroll area 1 of splitter group 1 of window mainWinIdx"
 # Seconds for the message list to load after selecting a folder.
 _UI_FOLDER_SETTLE_SECONDS = 1.2
 
@@ -321,7 +335,7 @@ def _ui_label_name(label: str) -> str:
 
 async def _ui_sidebar(bridge_obj) -> list[tuple[int, str, bool]] | None:
     """(row number, folder name, selected) for each sidebar row; None if unreadable."""
-    script = (
+    script = _UI_MAIN_WINDOW_PREAMBLE + (
         'tell application "System Events" to tell process "Microsoft Outlook"\n'
         f'    set o to {_UI_SIDEBAR}\n'
         '    set out to ""\n'
@@ -352,7 +366,8 @@ async def _ui_sidebar(bridge_obj) -> list[tuple[int, str, bool]] | None:
 
 async def _ui_select_sidebar_row(bridge_obj, row: int) -> None:
     await bridge_obj.run(
-        'tell application "System Events" to tell process "Microsoft Outlook"\n'
+        _UI_MAIN_WINDOW_PREAMBLE
+        + 'tell application "System Events" to tell process "Microsoft Outlook"\n'
         f'    select row {int(row)} of {_UI_SIDEBAR}\n'
         'end tell'
     )
@@ -412,7 +427,7 @@ def _ui_scope(layout: dict, inner: str, *, pane: bool = False) -> str:
     whose children are the list (group 1), header (group 2) and body (group 3).
     """
     chain = ["application \"System Events\"", "process \"Microsoft Outlook\"",
-             "window 1"]
+             "window mainWinIdx"]
     chain += ["splitter group 1"] * layout["splitters"]
     if not pane:
         chain += ["group 1", *layout["wrappers"]]
@@ -420,7 +435,7 @@ def _ui_scope(layout: dict, inner: str, *, pane: bool = False) -> str:
             chain.append("scroll area 1")
         chain.append("table 1")
     lines = [f"tell {c}" for c in chain] + [inner] + ["end tell"] * len(chain)
-    return "\n".join(lines)
+    return _UI_MAIN_WINDOW_PREAMBLE + "\n".join(lines)
 
 
 async def _ui_list_messages(bridge_obj, count: int = 10, unread_only: bool = False) -> list[dict]:

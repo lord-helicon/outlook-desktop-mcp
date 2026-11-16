@@ -98,7 +98,10 @@ def test_layouts_generate_both_paths():
     check("legacy: 3 splitters, no wrapper",
           leg.count("tell splitter group 1") == 3
           and "tell group 1\ntell scroll area 1\ntell table 1" in leg, leg)
-    check("tells balanced", new.count("tell ") == new.count("end tell"))
+    chain = new[len(server_mac._UI_MAIN_WINDOW_PREAMBLE):]
+    check("tells balanced", chain.count("tell ") == chain.count("end tell"))
+    check("targets the main window, not the front one",
+          new.startswith(server_mac._UI_MAIN_WINDOW_PREAMBLE) and "tell window mainWinIdx" in new)
     flat = server_mac._ui_scope(server_mac._UI_LAYOUTS[2], "X")
     check("flat (16.115): 3 splitters, table directly under group 1",
           flat.count("tell splitter group 1") == 3 and "tell group 1\ntell table 1" in flat
