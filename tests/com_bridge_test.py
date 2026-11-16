@@ -10,6 +10,7 @@ import asyncio
 import os
 import sys
 import threading
+import time
 import types
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -184,6 +185,33 @@ async def main():
     except ValueError:
         check("non-COM error propagates", True)
     check("no reconnect for non-COM error", dispatch_count == 1)
+    b.stop()
+
+    # 4b. Cancelled caller: its still-queued request is skipped (audit finding
+    #     com_bridge:OutlookBridge.call:cancelled-queued-request-not-abandoned)
+    b = new_bridge()
+    effects = []
+
+    def blocked(o, ns):
+        time.sleep(0.6)
+        effects.append("blocked-call-finished")
+
+    def fake_send(o, ns):
+        effects.append("SENT")
+
+    first = asyncio.ensure_future(b.call(blocked))
+    await asyncio.sleep(0.05)
+    second = asyncio.ensure_future(b.call(fake_send))
+    await asyncio.sleep(0.1)
+    second.cancel()
+    try:
+        await second
+        check("cancelled call raises CancelledError", False)
+    except asyncio.CancelledError:
+        check("cancelled call raises CancelledError", True)
+    await first
+    await asyncio.sleep(0.8)  # let the COM thread drain the queue
+    check("cancelled queued request is not executed", effects == ["blocked-call-finished"])
     b.stop()
 
     # 5. Abandoned (timed-out) queued request is skipped

@@ -14,9 +14,9 @@ next call works. The failed call is not re-run (it may already have sent mail
 or changed data); it raises OutlookReconnectedError with a message telling the
 caller the connection is back.
 
-Timeouts: call() gives up after 60s, but the COM thread is single-threaded and
-cannot be interrupted. A request that timed out while still queued is skipped
-(the caller already got a TimeoutError); a request already executing (e.g.
+Timeouts and cancellation: call() gives up after 60s, but the COM thread is
+single-threaded and cannot be interrupted. A request whose caller timed out or
+was cancelled while it was still queued is skipped; a request already executing (e.g.
 blocked on a dialog) keeps running until it returns and blocks later requests.
 """
 import threading
@@ -182,14 +182,24 @@ class OutlookBridge:
         self._request_queue.put((func, args, kwargs, result_event, result_holder))
 
         loop = asyncio.get_running_loop()
-        signaled = await loop.run_in_executor(
-            None, lambda: result_event.wait(timeout=CALL_TIMEOUT_SECONDS)
-        )
+        try:
+            signaled = await loop.run_in_executor(
+                None, lambda: result_event.wait(timeout=CALL_TIMEOUT_SECONDS)
+            )
+        except BaseException:
+            # The caller was cancelled (MCP notifications/cancelled, client
+            # disconnect, shutdown): the COM thread must skip the request if
+            # it has not started, so a cancelled send/delete never runs.
+            result_holder["abandoned"] = True
+            raise
         if not signaled:
             result_holder["abandoned"] = True  # COM thread skips it if still queued
             raise TimeoutError(
                 "Outlook COM operation timed out after 60 seconds. "
-                "Outlook may be waiting for user input (e.g., a dialog box)."
+                "Outlook may be waiting for user input (e.g., a dialog box). "
+                "If the operation had already started it may still complete; "
+                "check the result (e.g. Sent Items) before retrying anything "
+                "that sends or changes data."
             )
 
         if "error" in result_holder:

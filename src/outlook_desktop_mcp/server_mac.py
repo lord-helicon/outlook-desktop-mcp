@@ -24,6 +24,8 @@ from outlook_desktop_mcp.utils.applescript_helpers import (
     format_date,
     parse_date,
     resolve_folder_ref,
+    AS_DELIM,
+    AS_RECORD_DELIM,
     DELIM,
     RECORD_DELIM,
 )
@@ -176,9 +178,9 @@ async def _ui_list_messages(bridge_obj, count: int = 10) -> list[dict]:
         '    set r to row i\n'
         '    try\n'
         '        set cellDesc to description of UI element 1 of r\n'
-        f'        set output to output & cellDesc & "{RECORD_DELIM}"\n'
+        f'        set output to output & my sf(cellDesc) & {AS_RECORD_DELIM}\n'
         '    on error\n'
-        f'        set output to output & "{RECORD_DELIM}"\n'
+        f'        set output to output & {AS_RECORD_DELIM}\n'
         '    end try\n'
         'end repeat\n'
         'return output'
@@ -357,7 +359,7 @@ try
         end repeat
     end tell
 end try
-return emailSubject & "__D__" & emailFrom & "__D__" & emailDate & "__D__" & emailTo & "__D__" & emailBody""".replace("__D__", DELIM)
+return my sf(emailSubject) & (character id 1) & my sf(emailFrom) & (character id 1) & my sf(emailDate) & (character id 1) & my sf(emailTo) & (character id 1) & my sf(emailBody)"""
 
 
 async def _ui_read_email_by_row(bridge_obj, row_number: int) -> dict:
@@ -617,7 +619,7 @@ async def list_drafts(
         try
             set mbody to plain text content of m
         end try
-        set output to output & (mid as text) & "{DELIM}" & msubject & "{DELIM}" & mto & "{DELIM}" & mcc & "{DELIM}" & mbcc & "{DELIM}" & mtime & "{DELIM}" & (mattcount as text) & "{DELIM}" & mbody & "{RECORD_DELIM}"
+        set output to output & my sf((mid as text)) & {AS_DELIM} & my sf(msubject) & {AS_DELIM} & my sf(mto) & {AS_DELIM} & my sf(mcc) & {AS_DELIM} & my sf(mbcc) & {AS_DELIM} & my sf(mtime) & {AS_DELIM} & my sf((mattcount as text)) & {AS_DELIM} & my sf(mbody) & {AS_RECORD_DELIM}
     end repeat
     return output
 end tell'''
@@ -718,7 +720,7 @@ async def read_draft(draft_id: str) -> str:
     try
         set mhtml to content of m
     end try
-    return (mid as text) & "{DELIM}" & msubject & "{DELIM}" & mto & "{DELIM}" & mcc & "{DELIM}" & mbcc & "{DELIM}" & mtime & "{DELIM}" & mattnames & "{DELIM}" & mbody & "{DELIM}" & mhtml
+    return my sf((mid as text)) & {AS_DELIM} & my sf(msubject) & {AS_DELIM} & my sf(mto) & {AS_DELIM} & my sf(mcc) & {AS_DELIM} & my sf(mbcc) & {AS_DELIM} & my sf(mtime) & {AS_DELIM} & my sf(mattnames) & {AS_DELIM} & my sf(mbody) & {AS_DELIM} & my sf(mhtml)
 end tell'''
 
     try:
@@ -779,7 +781,7 @@ async def send_draft(draft_id: str) -> str:
         end repeat
     end try
     send m
-    return msubject & "{DELIM}" & mto
+    return my sf(msubject) & {AS_DELIM} & my sf(mto)
 end tell'''
 
     try:
@@ -881,7 +883,7 @@ async def list_emails(
         try
             set mattcount to count of (item i of attLists)
         end try
-        set output to output & ((item i of idList) as text) & "{DELIM}" & msubject & "{DELIM}" & msender & "{DELIM}" & msenderName & "{DELIM}" & mtime & "{DELIM}" & (misread as text) & "{DELIM}" & (mattcount as text) & "{RECORD_DELIM}"
+        set output to output & my sf(((item i of idList) as text)) & {AS_DELIM} & my sf(msubject) & {AS_DELIM} & my sf(msender) & {AS_DELIM} & my sf(msenderName) & {AS_DELIM} & my sf(mtime) & {AS_DELIM} & my sf((misread as text)) & {AS_DELIM} & my sf((mattcount as text)) & {AS_RECORD_DELIM}
     end repeat
     return output
 end tell'''
@@ -911,7 +913,7 @@ end tell'''
         try
             set mattcount to count of attachments of m
         end try
-        set output to output & (mid as text) & "{DELIM}" & msubject & "{DELIM}" & msender & "{DELIM}" & msenderName & "{DELIM}" & mtime & "{DELIM}" & (misread as text) & "{DELIM}" & (mattcount as text) & "{RECORD_DELIM}"
+        set output to output & my sf((mid as text)) & {AS_DELIM} & my sf(msubject) & {AS_DELIM} & my sf(msender) & {AS_DELIM} & my sf(msenderName) & {AS_DELIM} & my sf(mtime) & {AS_DELIM} & my sf((misread as text)) & {AS_DELIM} & my sf((mattcount as text)) & {AS_RECORD_DELIM}
     end repeat
     return output
 end tell'''
@@ -1051,7 +1053,7 @@ async def read_email(
     try
         set mbody to plain text content of m
     end try
-    return (mid as text) & "{DELIM}" & msubject & "{DELIM}" & msender & "{DELIM}" & msenderName & "{DELIM}" & mtime & "{DELIM}" & (misread as text) & "{DELIM}" & (mattcount as text) & "{DELIM}" & mto & "{DELIM}" & mcc & "{DELIM}" & mbody
+    return my sf((mid as text)) & {AS_DELIM} & my sf(msubject) & {AS_DELIM} & my sf(msender) & {AS_DELIM} & my sf(msenderName) & {AS_DELIM} & my sf(mtime) & {AS_DELIM} & my sf((misread as text)) & {AS_DELIM} & my sf((mattcount as text)) & {AS_DELIM} & my sf(mto) & {AS_DELIM} & my sf(mcc) & {AS_DELIM} & my sf(mbody)
 end tell'''
     elif subject_search:
         folder_ref = resolve_folder_ref(folder)
@@ -1095,7 +1097,7 @@ end tell'''
     try
         set mbody to plain text content of m
     end try
-    return (mid as text) & "{DELIM}" & msubject & "{DELIM}" & msender & "{DELIM}" & msenderName & "{DELIM}" & mtime & "{DELIM}" & (misread as text) & "{DELIM}" & (mattcount as text) & "{DELIM}" & mto & "{DELIM}" & mcc & "{DELIM}" & mbody
+    return my sf((mid as text)) & {AS_DELIM} & my sf(msubject) & {AS_DELIM} & my sf(msender) & {AS_DELIM} & my sf(msenderName) & {AS_DELIM} & my sf(mtime) & {AS_DELIM} & my sf((misread as text)) & {AS_DELIM} & my sf((mattcount as text)) & {AS_DELIM} & my sf(mto) & {AS_DELIM} & my sf(mcc) & {AS_DELIM} & my sf(mbody)
 end tell'''
     else:
         return json.dumps({"error": "Provide either entry_id or subject_search"})
@@ -1314,7 +1316,7 @@ def _folder_listing_pass(level: int, max_depth: int) -> str:
                         set uu{level} to item i{level} of unread{level}
                         if uu{level} is not missing value then set u{level} to uu{level}
                     end try
-                    set output to output & acctName & "{DELIM}" & path{level} & "{DELIM}" & (c{level} as text) & "{DELIM}" & (u{level} as text) & "{RECORD_DELIM}"{deeper}
+                    set output to output & my sf(acctName) & {AS_DELIM} & my sf(path{level}) & {AS_DELIM} & my sf((c{level} as text)) & {AS_DELIM} & my sf((u{level} as text)) & {AS_RECORD_DELIM}{deeper}
                 end if
             end repeat
         end try'''
@@ -1372,7 +1374,7 @@ async def create_draft_reply(
     {content_line}
     save replyMsg
     set mid to id of replyMsg
-    return (mid as text) & "{DELIM}" & originalSubject & "{DELIM}" & subject of replyMsg
+    return my sf((mid as text)) & {AS_DELIM} & my sf(originalSubject) & {AS_DELIM} & my sf(subject of replyMsg)
 end tell'''
 
     try:
@@ -1461,7 +1463,7 @@ end tell'''
         set fname to name of f
         set fcount to count of messages of f
         set funread to unread count of f
-        set output to output & fname & "{DELIM}" & (fcount as text) & "{DELIM}" & (funread as text) & "{RECORD_DELIM}"
+        set output to output & my sf(fname) & {AS_DELIM} & my sf((fcount as text)) & {AS_DELIM} & my sf((funread as text)) & {AS_RECORD_DELIM}
     end repeat
     return output
 end tell'''
@@ -1572,7 +1574,7 @@ async def search_emails(
         try
             set mattcount to count of (item i of attLists)
         end try
-        set output to output & ((item i of idList) as text) & "{DELIM}" & msubject & "{DELIM}" & msender & "{DELIM}" & msenderName & "{DELIM}" & mtime & "{DELIM}" & (misread as text) & "{DELIM}" & (mattcount as text) & "{RECORD_DELIM}"
+        set output to output & my sf(((item i of idList) as text)) & {AS_DELIM} & my sf(msubject) & {AS_DELIM} & my sf(msender) & {AS_DELIM} & my sf(msenderName) & {AS_DELIM} & my sf(mtime) & {AS_DELIM} & my sf((misread as text)) & {AS_DELIM} & my sf((mattcount as text)) & {AS_RECORD_DELIM}
     end repeat
     return output
 end tell'''
@@ -1602,7 +1604,7 @@ end tell'''
         try
             set mattcount to count of attachments of m
         end try
-        set output to output & (mid as text) & "{DELIM}" & msubject & "{DELIM}" & msender & "{DELIM}" & msenderName & "{DELIM}" & mtime & "{DELIM}" & (misread as text) & "{DELIM}" & (mattcount as text) & "{RECORD_DELIM}"
+        set output to output & my sf((mid as text)) & {AS_DELIM} & my sf(msubject) & {AS_DELIM} & my sf(msender) & {AS_DELIM} & my sf(msenderName) & {AS_DELIM} & my sf(mtime) & {AS_DELIM} & my sf((misread as text)) & {AS_DELIM} & my sf((mattcount as text)) & {AS_RECORD_DELIM}
     end repeat
     return output
 end tell'''
@@ -1727,7 +1729,7 @@ repeat with i from 1 to maxFetch
     try
         set eallday to item i of alldayList
     end try
-    set output to output & ((item i of idList) as text) & "{DELIM}" & esubject & "{DELIM}" & estart & "{DELIM}" & eend & "{DELIM}" & elocation & "{DELIM}" & eorganizer & "{DELIM}" & (eallday as text) & "{RECORD_DELIM}"
+    set output to output & my sf(((item i of idList) as text)) & {AS_DELIM} & my sf(esubject) & {AS_DELIM} & my sf(estart) & {AS_DELIM} & my sf(eend) & {AS_DELIM} & my sf(elocation) & {AS_DELIM} & my sf(eorganizer) & {AS_DELIM} & my sf((eallday as text)) & {AS_RECORD_DELIM}
 end repeat
 return output'''
 
@@ -1779,7 +1781,7 @@ return output'''
         try
             set eallday to item i of alldayList
         end try
-        set output to output & ((item i of idList) as text) & "{DELIM}" & esubject & "{DELIM}" & estart & "{DELIM}" & eend & "{DELIM}" & elocation & "{DELIM}" & eorganizer & "{DELIM}" & (eallday as text) & "{RECORD_DELIM}"
+        set output to output & my sf(((item i of idList) as text)) & {AS_DELIM} & my sf(esubject) & {AS_DELIM} & my sf(estart) & {AS_DELIM} & my sf(eend) & {AS_DELIM} & my sf(elocation) & {AS_DELIM} & my sf(eorganizer) & {AS_DELIM} & my sf((eallday as text)) & {AS_RECORD_DELIM}
     end repeat
     return output
 end tell'''
@@ -1877,7 +1879,7 @@ async def get_event(entry_id: str) -> str:
             set eattendees to eattendees & address of a & "; "
         end repeat
     end try
-    return (eid as text) & "{DELIM}" & esubject & "{DELIM}" & estart & "{DELIM}" & eend & "{DELIM}" & elocation & "{DELIM}" & eorganizer & "{DELIM}" & (eallday as text) & "{DELIM}" & ebody & "{DELIM}" & eattendees
+    return my sf((eid as text)) & {AS_DELIM} & my sf(esubject) & {AS_DELIM} & my sf(estart) & {AS_DELIM} & my sf(eend) & {AS_DELIM} & my sf(elocation) & {AS_DELIM} & my sf(eorganizer) & {AS_DELIM} & my sf((eallday as text)) & {AS_DELIM} & my sf(ebody) & {AS_DELIM} & my sf(eattendees)
 end tell'''
 
     try:
@@ -1949,7 +1951,7 @@ async def create_event(
 
     script = f'''tell application "Microsoft Outlook"
     set newEvt to make new calendar event with properties {{{props}}}
-    return (id of newEvt as text) & "{DELIM}" & (subject of newEvt) & "{DELIM}" & (start time of newEvt as string) & "{DELIM}" & (end time of newEvt as string)
+    return my sf((id of newEvt as text)) & {AS_DELIM} & my sf((subject of newEvt)) & {AS_DELIM} & my sf((start time of newEvt as string)) & {AS_DELIM} & my sf((end time of newEvt as string))
 end tell'''
 
     try:
@@ -2086,7 +2088,7 @@ async def update_event(
     script = f'''tell application "Microsoft Outlook"
     set e to calendar event id {entry_id}
     {set_lines}
-    return (id of e as text) & "{DELIM}" & (subject of e) & "{DELIM}" & (start time of e as string) & "{DELIM}" & (end time of e as string) & "{DELIM}" & (location of e)
+    return my sf((id of e as text)) & {AS_DELIM} & my sf((subject of e)) & {AS_DELIM} & my sf((start time of e as string)) & {AS_DELIM} & my sf((end time of e as string)) & {AS_DELIM} & my sf((location of e))
 end tell'''
 
     try:
@@ -2213,7 +2215,7 @@ async def search_events(
         try
             set eallday to item i of alldayList
         end try
-        set output to output & ((item i of idList) as text) & "{DELIM}" & esubject & "{DELIM}" & estart & "{DELIM}" & eend & "{DELIM}" & elocation & "{DELIM}" & eorganizer & "{DELIM}" & (eallday as text) & "{RECORD_DELIM}"
+        set output to output & my sf(((item i of idList) as text)) & {AS_DELIM} & my sf(esubject) & {AS_DELIM} & my sf(estart) & {AS_DELIM} & my sf(eend) & {AS_DELIM} & my sf(elocation) & {AS_DELIM} & my sf(eorganizer) & {AS_DELIM} & my sf((eallday as text)) & {AS_RECORD_DELIM}
     end repeat
     return output
 end tell'''
@@ -2239,7 +2241,7 @@ end tell'''
             set eorganizer to organizer of e
         end try
         set eallday to all day flag of e
-        set output to output & (eid as text) & "{DELIM}" & esubject & "{DELIM}" & estart & "{DELIM}" & eend & "{DELIM}" & elocation & "{DELIM}" & eorganizer & "{DELIM}" & (eallday as text) & "{RECORD_DELIM}"
+        set output to output & my sf((eid as text)) & {AS_DELIM} & my sf(esubject) & {AS_DELIM} & my sf(estart) & {AS_DELIM} & my sf(eend) & {AS_DELIM} & my sf(elocation) & {AS_DELIM} & my sf(eorganizer) & {AS_DELIM} & my sf((eallday as text)) & {AS_RECORD_DELIM}
     end repeat
     return output
 end tell'''
@@ -2331,7 +2333,7 @@ async def list_tasks(
         try
             set tpriority to (item i of priList) as text
         end try
-        set output to output & ((item i of idList) as text) & "{DELIM}" & tname & "{DELIM}" & tdue & "{DELIM}" & tflag & "{DELIM}" & tpriority & "{RECORD_DELIM}"
+        set output to output & my sf(((item i of idList) as text)) & {AS_DELIM} & my sf(tname) & {AS_DELIM} & my sf(tdue) & {AS_DELIM} & my sf(tflag) & {AS_DELIM} & my sf(tpriority) & {AS_RECORD_DELIM}
     end repeat
     return output
 end tell'''
@@ -2352,7 +2354,7 @@ end tell'''
         end try
         set tflag to todo flag of t
         set tpriority to priority of t
-        set output to output & (tid as text) & "{DELIM}" & tname & "{DELIM}" & tdue & "{DELIM}" & (tflag as text) & "{DELIM}" & (tpriority as text) & "{RECORD_DELIM}"
+        set output to output & my sf((tid as text)) & {AS_DELIM} & my sf(tname) & {AS_DELIM} & my sf(tdue) & {AS_DELIM} & my sf((tflag as text)) & {AS_DELIM} & my sf((tpriority as text)) & {AS_RECORD_DELIM}
     end repeat
     return output
 end tell'''
@@ -2413,7 +2415,7 @@ async def get_task(entry_id: str) -> str:
     try
         set tstartdate to start date of t as string
     end try
-    return (tid as text) & "{DELIM}" & tname & "{DELIM}" & tdue & "{DELIM}" & (tflag as text) & "{DELIM}" & (tpriority as text) & "{DELIM}" & tbody & "{DELIM}" & tstartdate
+    return my sf((tid as text)) & {AS_DELIM} & my sf(tname) & {AS_DELIM} & my sf(tdue) & {AS_DELIM} & my sf((tflag as text)) & {AS_DELIM} & my sf((tpriority as text)) & {AS_DELIM} & my sf(tbody) & {AS_DELIM} & my sf(tstartdate)
 end tell'''
 
     try:
@@ -2466,7 +2468,7 @@ async def create_task(
 
     script = f'''tell application "Microsoft Outlook"
     set newTask to make new task with properties {{{props}}}
-    return (id of newTask as text) & "{DELIM}" & (name of newTask)
+    return my sf((id of newTask as text)) & {AS_DELIM} & my sf((name of newTask))
 end tell'''
 
     try:
@@ -2564,7 +2566,7 @@ async def list_attachments(entry_id: str) -> str:
         set a to item i of attList
         set aname to name of a
         set asize to file size of a
-        set output to output & (i as text) & "{DELIM}" & aname & "{DELIM}" & (asize as text) & "{RECORD_DELIM}"
+        set output to output & my sf((i as text)) & {AS_DELIM} & my sf(aname) & {AS_DELIM} & my sf((asize as text)) & {AS_RECORD_DELIM}
     end repeat
     return output
 end tell'''
@@ -2644,7 +2646,7 @@ end tell'''
     set aname to name of a
     set savePath to "{escape(save_dir_posix)}/" & aname
     save a in savePath
-    return aname & "{DELIM}" & savePath
+    return my sf(aname) & {AS_DELIM} & my sf(savePath)
 end tell'''
 
     try:
