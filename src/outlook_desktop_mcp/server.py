@@ -1169,6 +1169,29 @@ def _parse_date(date_str: str) -> datetime:
     return datetime.fromisoformat(date_str)
 
 
+def _parse_date_arg(value: str, label: str):
+    """Parse a caller-supplied ISO date for assignment to a COM property.
+
+    Returns ``(datetime, None)`` or ``(None, error_message)``. The result is
+    always a naive local-time datetime: pywin32 converts naive datetimes as
+    local time, whereas assigning the raw string would make Outlook parse it
+    with the Windows regional settings (wrong day/month on non-US locales).
+    Timezone-aware input is converted to local time first. Date-only input
+    ("2026-02-25") becomes midnight, which is what all-day events and task
+    due dates need.
+    """
+    try:
+        dt = _parse_date(value.strip())
+    except (ValueError, TypeError, AttributeError):
+        return None, (
+            f"Error: Invalid {label} '{value}'. Use ISO 8601, e.g. "
+            "'2026-02-25', '2026-02-25 14:00' or '2026-02-25T14:00:00'."
+        )
+    if dt.tzinfo is not None:
+        dt = dt.astimezone().replace(tzinfo=None)
+    return dt, None
+
+
 # --- Helper: locale-safe date literals for Outlook Restrict()/DASL filters ---
 
 # Win32 constants for GetDateFormatW / GetTimeFormatW. win32con does not
@@ -1315,8 +1338,12 @@ async def list_events(
         items.Sort("[Start]")
         items.IncludeRecurrences = True
 
-        start = _parse_date(start_date) if start_date else datetime.now()
-        end = _parse_date(end_date) if end_date else start + timedelta(days=7)
+        start, err = _parse_date_arg(start_date, "start_date") if start_date else (datetime.now(), None)
+        if err:
+            return err
+        end, err = _parse_date_arg(end_date, "end_date") if end_date else (start + timedelta(days=7), None)
+        if err:
+            return err
 
         filtered = items.Restrict(_event_overlap_filter(start, end))
 
@@ -1417,6 +1444,12 @@ async def create_event(
     """
     def _create(outlook, namespace, subject, start, end, location, body,
                 all_day, reminder_minutes, account, calendar):
+        start_dt, err = _parse_date_arg(start, "start")
+        if err:
+            return err
+        end_dt, err = _parse_date_arg(end, "end")
+        if err:
+            return err
         # Create directly inside the target calendar folder if one was
         # requested. (Note: creating via outlook.CreateItem() and then
         # calling .Move() on the unsaved item fails with a COM exception —
@@ -1436,8 +1469,8 @@ async def create_event(
         else:
             appt = outlook.CreateItem(OL_APPOINTMENT_ITEM)
         appt.Subject = subject
-        appt.Start = start
-        appt.End = end
+        appt.Start = start_dt
+        appt.End = end_dt
         if location:
             appt.Location = location
         if body:
@@ -1569,6 +1602,12 @@ async def create_meeting(
     """
     def _create(outlook, namespace, subject, start, end, required_attendees,
                 location, body, optional_attendees, account):
+        start_dt, err = _parse_date_arg(start, "start")
+        if err:
+            return err
+        end_dt, err = _parse_date_arg(end, "end")
+        if err:
+            return err
         appt = outlook.CreateItem(OL_APPOINTMENT_ITEM)
         # Set sending account
         if account:
@@ -1578,8 +1617,8 @@ async def create_meeting(
                     appt._oleobj_.Invoke(*(64209, 0, 8, 0, acc))
                     break
         appt.Subject = subject
-        appt.Start = start
-        appt.End = end
+        appt.Start = start_dt
+        appt.End = end_dt
         appt.MeetingStatus = OL_MEETING
         if location:
             appt.Location = location
@@ -1652,12 +1691,23 @@ async def update_event(
         item = _get_item(namespace, entry_id, account)
         if err := _check_item_class(item, _OL_CLASS_APPOINTMENT, "appointment/meeting item"):
             return err
+        # Validate all dates before touching the item so a bad value does not
+        # leave it half-updated.
+        start_dt = end_dt = None
+        if start:
+            start_dt, err = _parse_date_arg(start, "start")
+            if err:
+                return err
+        if end:
+            end_dt, err = _parse_date_arg(end, "end")
+            if err:
+                return err
         if subject:
             item.Subject = subject
-        if start:
-            item.Start = start
-        if end:
-            item.End = end
+        if start_dt:
+            item.Start = start_dt
+        if end_dt:
+            item.End = end_dt
         if location:
             item.Location = location
         if body:
@@ -1826,8 +1876,18 @@ async def search_events(
         items.Sort("[Start]")
         items.IncludeRecurrences = True
 
-        start = _parse_date(start_date) if start_date else datetime.now() - timedelta(days=30)
-        end = _parse_date(end_date) if end_date else datetime.now() + timedelta(days=30)
+        start, err = (
+            _parse_date_arg(start_date, "start_date") if start_date
+            else (datetime.now() - timedelta(days=30), None)
+        )
+        if err:
+            return err
+        end, err = (
+            _parse_date_arg(end_date, "end_date") if end_date
+            else (datetime.now() + timedelta(days=30), None)
+        )
+        if err:
+            return err
 
         filtered = items.Restrict(_event_overlap_filter(start, end))
 
@@ -1949,6 +2009,11 @@ async def create_task(
     """
     def _create(outlook, namespace, subject, body, due_date, importance,
                 reminder_minutes, account):
+        due_dt = None
+        if due_date:
+            due_dt, err = _parse_date_arg(due_date, "due_date")
+            if err:
+                return err
         # Create directly inside the target store's tasks folder if one was
         # requested. (Note: creating via outlook.CreateItem() and then
         # calling .Move() on the unsaved item fails with a COM exception —
@@ -1963,7 +2028,7 @@ async def create_task(
         if body:
             task.Body = body
         if due_date:
-            task.DueDate = due_date
+            task.DueDate = due_dt
         imp_map = {"low": 0, "normal": 1, "high": 2}
         task.Importance = imp_map.get(importance.lower(), 1)
         if reminder_minutes > 0:
