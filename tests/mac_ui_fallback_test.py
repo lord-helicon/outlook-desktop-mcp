@@ -419,6 +419,8 @@ def test_injection_rejected_everywhere():
         for bad in INJECTIONS + ["ui-2", f"ui-2-{FP}", "ui-2-zzzzzzzz"]:
             if name == "read_email" and bad in ("", "ui-2", f"ui-2-{FP}"):
                 continue  # empty -> subject path; ui ids covered in test_read_email_ui_id
+            if name in ("move_email", "mark_as_read", "mark_as_unread") and bad == f"ui-2-{FP}":
+                continue  # valid ui id: acts through the window (new_outlook_actions_test)
             fake = FakeBridge(output="OK")
             server_mac.bridge = fake
             try:
