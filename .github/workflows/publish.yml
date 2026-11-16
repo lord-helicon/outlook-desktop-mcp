@@ -1,8 +1,10 @@
 name: Publish to PyPI
 
+# Disabled on push in this fork: it would publish to PyPI under upstream's
+# package name (outlook-desktop-mcp). Only runs when triggered by hand;
+# rename the package in pyproject.toml before ever running it.
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 jobs:
   publish:
