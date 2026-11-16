@@ -141,6 +141,14 @@ def _require_store(namespace, account: str = ""):
 
 # --- Helper: resolve folder by name ---
 
+def _get_item(namespace, entry_id: str, account: str = ""):
+    """Fetch an item by EntryID, scoped to the given account's store if set."""
+    if account:
+        store = _require_store(namespace, account)
+        return namespace.GetItemFromID(entry_id, store.StoreID)
+    return namespace.GetItemFromID(entry_id)
+
+
 def _walk_folders(parent, name_lower: str):
     """Recursively search subfolders of parent for a folder matching name_lower."""
     try:
@@ -503,11 +511,7 @@ async def read_draft(
         body, html_body, attachments, last_modified, has_attachments).
     """
     def _read(outlook, namespace, draft_id, account):
-        if account:
-            store = _require_store(namespace, account)
-            item = namespace.GetItemFromID(draft_id, store.StoreID)
-        else:
-            item = namespace.GetItemFromID(draft_id)
+        item = _get_item(namespace, draft_id, account)
         if err := _check_item_class(item, _OL_CLASS_MAIL, "mail item"):
             return err
 
@@ -578,11 +582,7 @@ async def send_draft(
         an error.
     """
     def _send(outlook, namespace, draft_id, account):
-        if account:
-            store = _require_store(namespace, account)
-            item = namespace.GetItemFromID(draft_id, store.StoreID)
-        else:
-            item = namespace.GetItemFromID(draft_id)
+        item = _get_item(namespace, draft_id, account)
         if err := _check_item_class(item, _OL_CLASS_MAIL, "mail item"):
             return err
         if item.Sent:
@@ -771,11 +771,7 @@ async def mark_as_read(entry_id: str, account: str = "") -> str:
         Confirmation message with the email subject, or an error.
     """
     def _mark(outlook, namespace, entry_id, account):
-        if account:
-            store = _require_store(namespace, account)
-            item = namespace.GetItemFromID(entry_id, store.StoreID)
-        else:
-            item = namespace.GetItemFromID(entry_id)
+        item = _get_item(namespace, entry_id, account)
         if err := _check_item_class(item, _OL_CLASS_MAIL, "mail item"):
             return err
         subject = item.Subject
@@ -810,11 +806,7 @@ async def mark_as_unread(entry_id: str, account: str = "") -> str:
         Confirmation message with the email subject, or an error.
     """
     def _mark(outlook, namespace, entry_id, account):
-        if account:
-            store = _require_store(namespace, account)
-            item = namespace.GetItemFromID(entry_id, store.StoreID)
-        else:
-            item = namespace.GetItemFromID(entry_id)
+        item = _get_item(namespace, entry_id, account)
         if err := _check_item_class(item, _OL_CLASS_MAIL, "mail item"):
             return err
         subject = item.Subject
@@ -904,11 +896,7 @@ async def reply_email(
         Confirmation indicating the reply was sent, or an error.
     """
     def _reply(outlook, namespace, entry_id, body, reply_all, account):
-        if account:
-            store = _require_store(namespace, account)
-            item = namespace.GetItemFromID(entry_id, store.StoreID)
-        else:
-            item = namespace.GetItemFromID(entry_id)
+        item = _get_item(namespace, entry_id, account)
         if err := _check_item_class(item, _OL_CLASS_MAIL, "mail item"):
             return err
         subject = item.Subject
@@ -980,11 +968,7 @@ async def create_draft_reply(
     def _draft_reply(outlook, namespace, entry_id, body, reply_all, html_body, account):
         if not body and not html_body:
             return "Error: Provide body or html_body."
-        if account:
-            store = _require_store(namespace, account)
-            item = namespace.GetItemFromID(entry_id, store.StoreID)
-        else:
-            item = namespace.GetItemFromID(entry_id)
+        item = _get_item(namespace, entry_id, account)
         if err := _check_item_class(item, _OL_CLASS_MAIL, "mail item"):
             return err
         original_subject = item.Subject
@@ -1365,11 +1349,7 @@ async def get_event(entry_id: str, account: str = "") -> str:
         JSON object with full event details.
     """
     def _get(outlook, namespace, entry_id, account):
-        if account:
-            store = _require_store(namespace, account)
-            item = namespace.GetItemFromID(entry_id, store.StoreID)
-        else:
-            item = namespace.GetItemFromID(entry_id)
+        item = _get_item(namespace, entry_id, account)
         return json.dumps(format_event_full(item), indent=2, default=str)
 
     try:
@@ -1658,11 +1638,7 @@ async def update_event(
         Confirmation with updated event details, or an error.
     """
     def _update(outlook, namespace, entry_id, subject, start, end, location, body, account):
-        if account:
-            store = _require_store(namespace, account)
-            item = namespace.GetItemFromID(entry_id, store.StoreID)
-        else:
-            item = namespace.GetItemFromID(entry_id)
+        item = _get_item(namespace, entry_id, account)
         if err := _check_item_class(item, _OL_CLASS_APPOINTMENT, "appointment/meeting item"):
             return err
         if subject:
@@ -1715,11 +1691,7 @@ async def delete_event(entry_id: str, account: str = "") -> str:
         Confirmation with the event subject, or an error.
     """
     def _delete(outlook, namespace, entry_id, account):
-        if account:
-            store = _require_store(namespace, account)
-            item = namespace.GetItemFromID(entry_id, store.StoreID)
-        else:
-            item = namespace.GetItemFromID(entry_id)
+        item = _get_item(namespace, entry_id, account)
         if err := _check_item_class(item, _OL_CLASS_APPOINTMENT, "appointment/meeting item"):
             return err
         subject = item.Subject
@@ -1777,11 +1749,7 @@ async def respond_to_meeting(
         if response_lower not in response_map:
             return f"Error: response must be 'accept', 'decline', or 'tentative'. Got: '{response}'"
 
-        if account:
-            store = _require_store(namespace, account)
-            item = namespace.GetItemFromID(entry_id, store.StoreID)
-        else:
-            item = namespace.GetItemFromID(entry_id)
+        item = _get_item(namespace, entry_id, account)
         if err := _check_item_class(item, _OL_CLASS_APPOINTMENT, "appointment/meeting item"):
             return err
         subject = item.Subject
@@ -1939,11 +1907,7 @@ async def get_task(entry_id: str, account: str = "") -> str:
         JSON object with full task details including body.
     """
     def _get(outlook, namespace, entry_id, account):
-        if account:
-            store = _require_store(namespace, account)
-            item = namespace.GetItemFromID(entry_id, store.StoreID)
-        else:
-            item = namespace.GetItemFromID(entry_id)
+        item = _get_item(namespace, entry_id, account)
         return json.dumps(format_task_full(item), indent=2, default=str)
 
     try:
@@ -2032,11 +1996,7 @@ async def complete_task(entry_id: str, account: str = "") -> str:
         Confirmation with the task subject.
     """
     def _complete(outlook, namespace, entry_id, account):
-        if account:
-            store = _require_store(namespace, account)
-            item = namespace.GetItemFromID(entry_id, store.StoreID)
-        else:
-            item = namespace.GetItemFromID(entry_id)
+        item = _get_item(namespace, entry_id, account)
         if err := _check_item_class(item, _OL_CLASS_TASK, "task item"):
             return err
         item.Status = OL_TASK_COMPLETE
@@ -2063,11 +2023,7 @@ async def delete_task(entry_id: str, account: str = "") -> str:
         Confirmation with the task subject.
     """
     def _delete(outlook, namespace, entry_id, account):
-        if account:
-            store = _require_store(namespace, account)
-            item = namespace.GetItemFromID(entry_id, store.StoreID)
-        else:
-            item = namespace.GetItemFromID(entry_id)
+        item = _get_item(namespace, entry_id, account)
         if err := _check_item_class(item, _OL_CLASS_TASK, "task item"):
             return err
         subject = item.Subject
@@ -2097,11 +2053,7 @@ async def list_attachments(entry_id: str, account: str = "") -> str:
         JSON array of attachment objects with index, filename, and size.
     """
     def _list(outlook, namespace, entry_id, account):
-        if account:
-            store = _require_store(namespace, account)
-            item = namespace.GetItemFromID(entry_id, store.StoreID)
-        else:
-            item = namespace.GetItemFromID(entry_id)
+        item = _get_item(namespace, entry_id, account)
         results = []
         for i in range(item.Attachments.Count):
             att = item.Attachments.Item(i + 1)
@@ -2142,11 +2094,7 @@ async def save_attachment(
         The full file path where the attachment was saved, or an error.
     """
     def _save(outlook, namespace, entry_id, attachment_index, save_directory, account):
-        if account:
-            store = _require_store(namespace, account)
-            item = namespace.GetItemFromID(entry_id, store.StoreID)
-        else:
-            item = namespace.GetItemFromID(entry_id)
+        item = _get_item(namespace, entry_id, account)
         if attachment_index < 1 or item.Attachments.Count < attachment_index:
             return f"Error: Only {item.Attachments.Count} attachment(s), requested index {attachment_index}"
 
@@ -2240,11 +2188,7 @@ async def set_category(
         Confirmation with the item subject and applied categories.
     """
     def _set(outlook, namespace, entry_id, categories, account):
-        if account:
-            store = _require_store(namespace, account)
-            item = namespace.GetItemFromID(entry_id, store.StoreID)
-        else:
-            item = namespace.GetItemFromID(entry_id)
+        item = _get_item(namespace, entry_id, account)
         item.Categories = categories
         item.Save()
         return (
