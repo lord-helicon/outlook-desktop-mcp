@@ -64,7 +64,8 @@ def _bad_message_id(message_id: str, kind: str = "message") -> str | None:
     if re.fullmatch(r"ui-[0-9]+(?:-[0-9a-f]{8})?", s):
         return (
             f"Error: '{message_id}' came from UI scraping (New Outlook) and "
-            f"cannot be used as a {kind} id; only read_email accepts ui-N ids."
+            f"cannot be used as a {kind} id here; read_email, move_email, "
+            "mark_as_read and mark_as_unread accept ui-N ids."
         )
     if not (s.isascii() and s.isdigit()):
         return f"Error: '{message_id}' is not a valid Outlook {kind} id (expected digits)."
@@ -680,6 +681,251 @@ async def _ui_read_by_subject(folder: str, subject_search: str) -> str | None:
         if _is_ui_access_denied(e):
             return json.dumps({"error": UI_ACCESS_DENIED_MESSAGE})
         return None
+    return json.dumps(result, indent=2, default=str)
+
+
+# --- New Outlook: acting on a message through the window -----------------
+# Moving and read state can only be changed through Outlook's interface in
+# New Outlook. Outlook is brought to the front for these actions.
+
+_UI_ACTIVATE = (
+    'tell application "Microsoft Outlook" to activate\n'
+    'delay 0.5\n'
+    'tell application "System Events" to tell process "Microsoft Outlook" to set frontmost to true\n'
+)
+_UI_SELECT_SETTLE_SECONDS = 1.0
+
+
+async def _ui_find_row(bridge_obj, row_number: int, fingerprint: str) -> dict | None:
+    """The listed row (dict) holding the message with this fingerprint, or None."""
+    rows = await _ui_list_messages(bridge_obj, max(row_number, _UI_LOOKUP_ROWS))
+    best = None
+    for r in rows:
+        m = _UI_ID_RE.fullmatch(r["entry_id"])
+        if m and m.group(2) == fingerprint:
+            n = int(m.group(1))
+            if best is None or abs(n - row_number) < abs(best[0] - row_number):
+                best = (n, r)
+    return best[1] if best else None
+
+
+async def _ui_select_message(bridge_obj, row: int) -> None:
+    """Bring Outlook to the front and select (and focus) a message row."""
+    await bridge_obj.run(_UI_ACTIVATE)
+    last = None
+    for layout in _UI_LAYOUTS:
+        try:
+            await bridge_obj.run(_ui_scope(layout, f"set focused to true\nselect row {int(row)}"))
+            break
+        except Exception as e:
+            if _is_ui_access_denied(e):
+                raise
+            last = e
+    else:
+        raise last or RuntimeError("could not select the message")
+    await asyncio.sleep(_UI_SELECT_SETTLE_SECONDS)
+
+
+def _ui_parse_ui_id(entry_id: str):
+    """(row, fingerprint) for 'ui-N-xxxxxxxx', else None."""
+    m = _UI_ID_RE.fullmatch((entry_id or "").strip())
+    return (int(m.group(1)), m.group(2)) if m and int(m.group(1)) >= 1 else None
+
+
+def _ui_move_script(display_name: str) -> str:
+    """Move the selected message via Move > Choose Folder (⌘⇧M).
+
+    Picks the folder entry labelled exactly "<display_name>, <mailbox>", where
+    the mailbox comes from the main window title ("Inbox • <mailbox>"). With
+    no or several such entries the dialog is cancelled: the dialog preselects
+    a folder, so clicking Move without a verified choice could misfile mail.
+    Buttons are taken from the sheet's default/cancel attributes, not labels.
+    """
+    name = escape(display_name)
+    return _UI_MAIN_WINDOW_PREAMBLE + f"""
+on trimText(t)
+    repeat while t starts with " "
+        set t to text 2 thru -1 of t
+    end repeat
+    repeat while t ends with " "
+        set t to text 1 thru -2 of t
+    end repeat
+    return t
+end trimText
+on cancelSheet(sh)
+    tell application "System Events" to tell process "Microsoft Outlook"
+        try
+            click (value of attribute "AXCancelButton" of sh)
+        on error
+            key code 53
+        end try
+    end tell
+end cancelSheet
+set acct to ""
+tell application "System Events" to tell process "Microsoft Outlook"
+    set wt to title of window mainWinIdx
+    if wt contains "•" then
+        set AppleScript's text item delimiters to "•"
+        set acct to my trimText(text item 2 of wt)
+        set AppleScript's text item delimiters to ""
+    end if
+    if acct is "" then return "ERROR:Could not read the mailbox name from the Outlook window title."
+    keystroke "m" using {{command down, shift down}}
+end tell
+set sheetUp to false
+repeat 10 times
+    delay 0.3
+    tell application "System Events" to tell process "Microsoft Outlook"
+        if (count of sheets of window mainWinIdx) > 0 then set sheetUp to true
+    end tell
+    if sheetUp then exit repeat
+end repeat
+if not sheetUp then
+    try
+        tell application "System Events" to tell process "Microsoft Outlook"
+            click menu item "Choose Folder..." of menu 1 of menu item "Move" of menu 1 of menu bar item "Message" of menu bar 1
+        end tell
+        delay 1.5
+    end try
+end if
+tell application "System Events" to tell process "Microsoft Outlook"
+    if (count of sheets of window mainWinIdx) = 0 then return "ERROR:Outlook's Move dialog did not open."
+    set sh to sheet 1 of window mainWinIdx
+    set value of text field 1 of sh to "{name}"
+end tell
+delay 1.5
+tell application "System Events" to tell process "Microsoft Outlook"
+    set sh to sheet 1 of window mainWinIdx
+    set wanted to "{name}, " & acct
+    set matches to {{}}
+    repeat with g in groups of scroll area 1 of sh
+        try
+            if (description of g) is wanted then set end of matches to g
+        end try
+    end repeat
+    set n to count of matches
+end tell
+if n is not 1 then
+    my cancelSheet(sh)
+    return "NOMATCH:" & n
+end if
+tell application "System Events" to tell process "Microsoft Outlook"
+    click item 1 of matches
+    delay 0.8
+    try
+        click (value of attribute "AXDefaultButton" of sh)
+    on error
+        my cancelSheet(sh)
+        return "ERROR:Could not find the Move button."
+    end try
+end tell
+repeat 10 times
+    delay 0.3
+    tell application "System Events" to tell process "Microsoft Outlook"
+        if (count of sheets of window mainWinIdx) = 0 then return "MOVED"
+    end tell
+end repeat
+return "ERROR:The Move dialog did not close."
+"""
+
+
+async def _ui_move_email(entry_id: str, target_folder: str, source_folder: str) -> str:
+    """move_email for ui-N ids (New Outlook)."""
+    parsed = _ui_parse_ui_id(entry_id)
+    if not parsed:
+        return (f"Error: '{entry_id}' has no row fingerprint, so it could move the wrong "
+                "message. Call list_emails again and use the new id.")
+    row_number, fingerprint = parsed
+    target = (target_folder or "").strip()
+    if not target:
+        return "Error: target_folder is empty."
+    if _ui_folder_names(target)[0] == _ui_folder_names(source_folder)[0]:
+        return f"Error: the message is already in '{source_folder}'."
+
+    async def action():
+        side = await _ui_sidebar(bridge) or []
+        by_name = {}
+        for r in side:
+            by_name.setdefault(r[1].lower(), r[1])
+        display = next((by_name[n] for n in _ui_folder_names(target) if n in by_name), target)
+        row = await _ui_find_row(bridge, row_number, fingerprint)
+        if row is None:
+            return {"error": (f"The message for '{entry_id}' is no longer in the first "
+                              f"{max(row_number, _UI_LOOKUP_ROWS)} rows of '{source_folder}'. "
+                              "Call list_emails again (with the same folder).")}
+        current = int(_UI_ID_RE.fullmatch(row["entry_id"]).group(1))
+        await _ui_select_message(bridge, current)
+        out = (await bridge.run(_ui_move_script(display), timeout=60)).strip()
+        if out == "MOVED":
+            return {"status": "moved", "subject": row["subject"], "from_folder": source_folder,
+                    "to_folder": display,
+                    "note": "ui ids change after a move; call list_emails again before using them."}
+        if out.startswith("NOMATCH:"):
+            n = out.split(":", 1)[1]
+            return {"error": (f"Outlook's Move dialog has {n} folders named '{display}' in this "
+                              "mailbox, so nothing was moved. Use the folder name exactly as "
+                              "Outlook shows it.")}
+        return {"error": out.removeprefix("ERROR:") + " Nothing was moved."}
+
+    try:
+        result = await _ui_in_folder(bridge, source_folder, action)
+    except UIWrongFolderError as e:
+        return f"Error moving email: {e}"
+    except Exception as e:
+        if _is_ui_access_denied(e):
+            return f"Error moving email: {UI_ACCESS_DENIED_MESSAGE}"
+        return f"Error moving email: {e}"
+    if "error" in result:
+        return f"Error moving email: {result['error']}"
+    return json.dumps(result, indent=2, default=str)
+
+
+_UI_TOGGLE_UNREAD_SCRIPT = (
+    'tell application "System Events" to tell process "Microsoft Outlook"\n'
+    '    click menu item "Toggle Unread" of menu 1 of menu bar item "Message" of menu bar 1\n'
+    'end tell'
+)
+
+
+async def _ui_set_read_state(entry_id: str, unread: bool, source_folder: str) -> str:
+    """mark_as_read / mark_as_unread for ui-N ids (New Outlook)."""
+    verb = "marking email as unread" if unread else "marking email as read"
+    parsed = _ui_parse_ui_id(entry_id)
+    if not parsed:
+        return (f"Error: '{entry_id}' has no row fingerprint, so it could change the wrong "
+                "message. Call list_emails again and use the new id.")
+    row_number, fingerprint = parsed
+
+    async def action():
+        row = await _ui_find_row(bridge, row_number, fingerprint)
+        if row is None:
+            return {"error": (f"The message for '{entry_id}' is no longer in the first "
+                              f"{max(row_number, _UI_LOOKUP_ROWS)} rows of '{source_folder}'. "
+                              "Call list_emails again (with the same folder).")}
+        if row["unread"] == unread:
+            return {"status": "unchanged", "subject": row["subject"], "unread": unread}
+        current = int(_UI_ID_RE.fullmatch(row["entry_id"]).group(1))
+        await _ui_select_message(bridge, current)
+        # Selecting can itself mark the message read (reading pane): re-check.
+        row = await _ui_find_row(bridge, current, fingerprint)
+        if row is not None and row["unread"] != unread:
+            await bridge.run(_UI_TOGGLE_UNREAD_SCRIPT)
+            await asyncio.sleep(1.0)
+            row = await _ui_find_row(bridge, current, fingerprint)
+        if row is None or row["unread"] != unread:
+            return {"error": "Outlook did not change the read state."}
+        return {"status": "marked_unread" if unread else "marked_read", "subject": row["subject"]}
+
+    try:
+        result = await _ui_in_folder(bridge, source_folder, action)
+    except UIWrongFolderError as e:
+        return f"Error {verb}: {e}"
+    except Exception as e:
+        if _is_ui_access_denied(e):
+            return f"Error {verb}: {UI_ACCESS_DENIED_MESSAGE}"
+        return f"Error {verb}: {e}"
+    if "error" in result:
+        return f"Error {verb}: {result['error']}"
     return json.dumps(result, indent=2, default=str)
 
 
@@ -1554,7 +1800,7 @@ end tell'''
 # =====================================================================
 
 @mcp.tool()
-async def mark_as_read(entry_id: str) -> str:
+async def mark_as_read(entry_id: str, folder: str = "inbox") -> str:
     """Mark a specific email as read in Outlook.
 
     Changes the unread status to read, same as clicking on an email in Outlook.
@@ -1563,10 +1809,14 @@ async def mark_as_read(entry_id: str) -> str:
     Args:
         entry_id: The numeric ID of the email. Get this from list_emails
             or search_emails results.
+        folder: For ui-N ids (New Outlook): the folder the id was listed
+            from. Default "inbox". Outlook is brought to the front briefly.
 
     Returns:
         Confirmation message with the email subject, or an error.
     """
+    if _ui_parse_ui_id(entry_id) or (entry_id or '').strip().startswith('ui-'):
+        return await _ui_set_read_state(entry_id, False, folder)
     if err := _bad_message_id(entry_id):
         return err
     entry_id = entry_id.strip()
@@ -1588,7 +1838,7 @@ end tell'''
 # =====================================================================
 
 @mcp.tool()
-async def mark_as_unread(entry_id: str) -> str:
+async def mark_as_unread(entry_id: str, folder: str = "inbox") -> str:
     """Mark a specific email as unread in Outlook.
 
     Restores a previously read email to unread status. Useful for flagging
@@ -1597,10 +1847,14 @@ async def mark_as_unread(entry_id: str) -> str:
     Args:
         entry_id: The numeric ID of the email. Get this from list_emails
             or search_emails results.
+        folder: For ui-N ids (New Outlook): the folder the id was listed
+            from. Default "inbox". Outlook is brought to the front briefly.
 
     Returns:
         Confirmation message with the email subject, or an error.
     """
+    if _ui_parse_ui_id(entry_id) or (entry_id or '').strip().startswith('ui-'):
+        return await _ui_set_read_state(entry_id, True, folder)
     if err := _bad_message_id(entry_id):
         return err
     entry_id = entry_id.strip()
@@ -1625,6 +1879,7 @@ end tell'''
 async def move_email(
     entry_id: str,
     target_folder: str = "archive",
+    source_folder: str = "inbox",
 ) -> str:
     """Move an email to a different Outlook folder.
 
@@ -1637,11 +1892,16 @@ async def move_email(
         target_folder: Destination folder name. Default is "archive". Supports
             same names as list_emails: "inbox", "sent", "deleted"/"trash",
             "drafts", "junk"/"spam", or any custom folder name.
+        source_folder: For ui-N ids (New Outlook): the folder the id was
+            listed from. Default "inbox". The move goes through Outlook's
+            Move dialog, so Outlook is brought to the front for a few seconds.
 
     Returns:
         Confirmation with email subject and destination, or an error.
     """
     dest_ref = resolve_folder_ref(target_folder)
+    if _ui_parse_ui_id(entry_id) or (entry_id or '').strip().startswith('ui-'):
+        return await _ui_move_email(entry_id, target_folder, source_folder)
     if err := _bad_message_id(entry_id):
         return err
     entry_id = entry_id.strip()
