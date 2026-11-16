@@ -365,6 +365,127 @@ def test_reply_email_plain_thread_stays_plain():
     assert reply.sent
 
 
+# --- 4. save_attachment confinement -----------------------------------------
+
+class FakeAttachment:
+    def __init__(self, name="report.pdf"):
+        self.FileName = name
+        self.Size = 3
+        self.saved_to = []
+
+    def SaveAsFile(self, path):
+        self.saved_to.append(path)
+        with open(path, "wb") as f:
+            f.write(b"abc")
+
+
+class FakeAttachments:
+    def __init__(self, att):
+        self.att = att
+        self.Count = 1
+
+    def Item(self, _i):
+        return self.att
+
+
+class FakeAttItem:
+    def __init__(self, att):
+        self.Attachments = FakeAttachments(att)
+
+
+def _save(att, **kw):
+    _use(namespace=FakeNamespace(items_by_id={"a": FakeAttItem(att)}))
+    return _run(server.save_attachment("a", **kw))
+
+
+def _with_root(fn):
+    with tempfile.TemporaryDirectory() as tmp:
+        root = os.path.realpath(os.path.join(tmp, "root"))
+        os.makedirs(root)
+        old = os.environ.get("OUTLOOK_MCP_ATTACHMENT_DIR")
+        os.environ["OUTLOOK_MCP_ATTACHMENT_DIR"] = root
+        try:
+            fn(root, os.path.realpath(tmp))
+        finally:
+            if old is None:
+                del os.environ["OUTLOOK_MCP_ATTACHMENT_DIR"]
+            else:
+                os.environ["OUTLOOK_MCP_ATTACHMENT_DIR"] = old
+
+
+def test_save_attachment_default_dir_is_root():
+    def body(root, _tmp):
+        att = FakeAttachment()
+        out = json.loads(_save(att))
+        assert out["status"] == "saved"
+        assert out["path"] == os.path.join(root, "report.pdf")
+        assert os.path.exists(out["path"])
+    _with_root(body)
+
+
+def test_save_attachment_subdir_and_relative_ok():
+    def body(root, _tmp):
+        sub = os.path.join(root, "sub", "deeper")
+        out = json.loads(_save(FakeAttachment(), save_directory=sub))
+        assert out["path"] == os.path.join(sub, "report.pdf")
+        out = json.loads(_save(FakeAttachment(), save_directory="rel"))
+        assert out["path"] == os.path.join(root, "rel", "report.pdf")
+    _with_root(body)
+
+
+def test_save_attachment_rejects_outside_root():
+    def body(root, tmp):
+        outside = os.path.join(tmp, "Startup")
+        att = FakeAttachment()
+        for bad in (outside, os.path.join(root, "..", "Startup"), tmp, "../Startup"):
+            out = _save(att, save_directory=bad)
+            assert out.startswith("Error: save_directory must be inside"), (bad, out)
+        assert att.saved_to == []
+        assert not os.path.exists(outside), "must not create directories outside the root"
+        # A sibling that merely shares the root's name as a prefix is outside.
+        sibling = root + "-evil"
+        out = _save(att, save_directory=sibling)
+        assert out.startswith("Error: save_directory must be inside"), out
+        assert not os.path.exists(sibling)
+    _with_root(body)
+
+
+def test_save_attachment_rejects_symlink_escape():
+    def body(root, tmp):
+        outside = os.path.join(tmp, "elsewhere")
+        os.makedirs(outside)
+        link = os.path.join(root, "link")
+        try:
+            os.symlink(outside, link)
+        except (OSError, NotImplementedError):
+            return  # symlinks unavailable (e.g. unprivileged Windows)
+        att = FakeAttachment()
+        out = _save(att, save_directory=link)
+        assert out.startswith("Error: save_directory must be inside"), out
+        assert att.saved_to == []
+    _with_root(body)
+
+
+def test_save_attachment_does_not_overwrite():
+    def body(root, _tmp):
+        first = json.loads(_save(FakeAttachment()))
+        second = json.loads(_save(FakeAttachment()))
+        third = json.loads(_save(FakeAttachment()))
+        assert first["path"] == os.path.join(root, "report.pdf")
+        assert second["path"] == os.path.join(root, "report (1).pdf")
+        assert third["path"] == os.path.join(root, "report (2).pdf")
+        assert second["filename"] == "report (1).pdf"
+    _with_root(body)
+
+
+def test_save_attachment_sanitises_filename():
+    def body(root, _tmp):
+        out = json.loads(_save(FakeAttachment("../../evil.exe")))
+        assert os.path.dirname(out["path"]) == root
+        assert out["filename"] == "evil.exe"
+    _with_root(body)
+
+
 if __name__ == "__main__":
     test_list_events_uses_overlap_filter_and_keeps_call_order()
     test_search_events_uses_overlap_filter()
@@ -379,4 +500,7 @@ if __name__ == "__main__":
     test_list_events_invalid_date_is_clear_error()
     test_reply_email_html_thread_stays_html()
     test_reply_email_plain_thread_stays_plain()
+    for _name, _fn in list(globals().items()):
+        if _name.startswith("test_save_attachment"):
+            _fn()
     print("OK")

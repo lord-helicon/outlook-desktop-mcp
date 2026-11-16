@@ -2151,6 +2151,65 @@ async def list_attachments(entry_id: str, account: str = "") -> str:
         return f"Error listing attachments: {format_com_error(e)}"
 
 
+_ATTACHMENT_DIR_ENV = "OUTLOOK_MCP_ATTACHMENT_DIR"
+
+
+def _attachment_root() -> str:
+    """Root directory attachments may be saved under (realpath).
+
+    Default ~/Downloads; override with the OUTLOOK_MCP_ATTACHMENT_DIR env var.
+    """
+    root = os.environ.get(_ATTACHMENT_DIR_ENV) or os.path.join(
+        os.path.expanduser("~"), "Downloads"
+    )
+    return os.path.realpath(os.path.expanduser(root))
+
+
+def _is_within(path: str, root: str) -> bool:
+    """True if realpath ``path`` equals or is inside realpath ``root``."""
+    try:
+        return os.path.commonpath([os.path.normcase(path), os.path.normcase(root)]) == os.path.normcase(root)
+    except ValueError:  # different drives, or mixed absolute/relative
+        return False
+
+
+def _resolve_save_dir(save_directory: str, root: str):
+    """Resolve the caller's save_directory; returns (path, error).
+
+    Empty means the root itself. A relative path is taken relative to the
+    root. The realpath (symlinks resolved) must lie inside the root.
+    """
+    if not save_directory:
+        return root, None
+    candidate = os.path.expanduser(save_directory)
+    if not os.path.isabs(candidate):
+        candidate = os.path.join(root, candidate)
+    resolved = os.path.realpath(candidate)
+    if not _is_within(resolved, root):
+        return None, (
+            f"Error: save_directory must be inside the attachment root '{root}'. "
+            f"Set the {_ATTACHMENT_DIR_ENV} environment variable to change the root."
+        )
+    return resolved, None
+
+
+def _unique_path(directory: str, filename: str) -> str:
+    """Path in ``directory`` for ``filename`` that does not exist yet.
+
+    Appends " (1)", " (2)", ... before the extension rather than overwriting.
+    """
+    path = os.path.join(directory, filename)
+    if not os.path.exists(path):
+        return path
+    stem, ext = os.path.splitext(filename)
+    n = 1
+    while True:
+        path = os.path.join(directory, f"{stem} ({n}){ext}")
+        if not os.path.exists(path):
+            return path
+        n += 1
+
+
 @mcp.tool()
 async def save_attachment(
     entry_id: str,
@@ -2160,14 +2219,20 @@ async def save_attachment(
 ) -> str:
     """Save an attachment from an email or event to disk.
 
-    Downloads the specified attachment to a local directory.
+    Downloads the specified attachment to a local directory inside the
+    configured attachment root. Existing files are never overwritten: a
+    numeric suffix such as " (1)" is added to the file name instead.
 
     Args:
         entry_id: The EntryID of the email or event containing the attachment.
         attachment_index: Which attachment to save (1-based index). Default 1
             (first attachment). Use list_attachments to see available indices.
-        save_directory: Directory to save the file to. Default: user's
-            Downloads folder.
+        save_directory: Optional. Directory to save the file to. Must be
+            inside the attachment root: the user's Downloads folder by
+            default, or the directory named by the OUTLOOK_MCP_ATTACHMENT_DIR
+            environment variable. A relative path is resolved against that
+            root; paths that resolve outside it (including via symlinks or
+            "..") are rejected. Default: the root itself.
         account: Optional. Account display name (or substring). Only needed
             if entry_id is ambiguous across stores.
 
@@ -2180,11 +2245,10 @@ async def save_attachment(
             return f"Error: Only {item.Attachments.Count} attachment(s), requested index {attachment_index}"
 
         att = item.Attachments.Item(attachment_index)
-        if not save_directory:
-            save_directory = os.path.join(os.path.expanduser("~"), "Downloads")
-
-        # Resolve to real path before creating
-        save_directory = os.path.realpath(save_directory)
+        root = _attachment_root()
+        save_directory, err = _resolve_save_dir(save_directory, root)
+        if err:
+            return err
         os.makedirs(save_directory, exist_ok=True)
 
         # Strip path separators and dangerous characters from filename
@@ -2193,17 +2257,17 @@ async def save_attachment(
         if not safe_name:
             safe_name = "attachment"
 
-        save_path = os.path.join(save_directory, safe_name)
+        save_path = _unique_path(save_directory, safe_name)
 
         # Ensure final path is still inside the intended directory
-        if not os.path.realpath(save_path).startswith(save_directory + os.sep) and \
-           os.path.realpath(save_path) != save_directory:
+        # (e.g. an existing symlink named like the attachment).
+        if not _is_within(os.path.realpath(save_path), save_directory):
             return "Error: Attachment filename would escape the target directory."
 
         att.SaveAsFile(save_path)
         return json.dumps({
             "status": "saved",
-            "filename": safe_name,
+            "filename": os.path.basename(save_path),
             "path": save_path,
             "size": att.Size,
         }, indent=2, default=str)
