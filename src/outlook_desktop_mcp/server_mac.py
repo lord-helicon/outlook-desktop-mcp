@@ -27,6 +27,7 @@ from outlook_desktop_mcp.utils.applescript_helpers import (
     DELIM,
     RECORD_DELIM,
 )
+from outlook_desktop_mcp.utils.output import compact_json_tools
 from datetime import datetime, timedelta
 
 # --- Logging (all to stderr, stdout is reserved for MCP JSON-RPC) ---
@@ -81,6 +82,9 @@ mcp = FastMCP(
         "- Folders: list folder hierarchy"
     ),
 )
+
+# Every tool result leaves the server as compact JSON (see utils/output.py).
+compact_json_tools(mcp)
 
 bridge = AppleScriptBridge()
 
