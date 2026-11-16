@@ -161,7 +161,7 @@ def test_fingerprint_ignores_read_state():
     fake = FakeBridge(output=row("A", "one") + RECORD_DELIM)
     asyncio.run(server_mac._ui_list_messages(fake, 5))
     check("rows script emits empty record on error",
-          f'on error\n        set output to output & "{RECORD_DELIM}"' in fake.scripts[0],
+          'on error\n        set output to output & (character id 2)' in fake.scripts[0],
           fake.scripts[0])
 
 

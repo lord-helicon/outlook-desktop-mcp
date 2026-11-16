@@ -10,6 +10,8 @@ import asyncio
 import logging
 import os
 
+from outlook_desktop_mcp.utils.applescript_helpers import SANITIZE_HANDLER
+
 logger = logging.getLogger("outlook_desktop_mcp.applescript_bridge")
 
 
@@ -53,8 +55,10 @@ class AppleScriptBridge:
 
         Raises RuntimeError on non-zero exit or timeout.
         """
+        # Every script gets the `sf` handler that strips the output separators
+        # from field values (see utils/applescript_helpers.py).
         proc = await asyncio.create_subprocess_exec(
-            "osascript", "-e", script,
+            "osascript", "-e", SANITIZE_HANDLER + script,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -66,8 +70,22 @@ class AppleScriptBridge:
             proc.kill()
             await proc.communicate()
             raise RuntimeError(
-                f"AppleScript timed out after {timeout}s"
+                f"AppleScript timed out after {timeout}s. If the script had "
+                f"already reached Outlook, the operation may still have "
+                f"completed; check before retrying anything that sends or "
+                f"changes data."
             )
+        except BaseException:
+            # The request was cancelled (MCP notifications/cancelled, client
+            # disconnect, server shutdown). Stop osascript so a later Apple
+            # Event in the script (send, delete, move) is never dispatched.
+            # Do not await here: the task is being cancelled.
+            if proc.returncode is None:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+            raise
 
         if proc.returncode != 0:
             err = stderr.decode("utf-8", errors="replace").strip()

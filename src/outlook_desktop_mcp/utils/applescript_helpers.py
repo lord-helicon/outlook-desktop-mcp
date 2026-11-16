@@ -122,6 +122,35 @@ def resolve_folder_ref(folder_name: str) -> str:
     return f'mail folder "{escape(folder_name)}"'
 
 
-# Delimiter used for structured AppleScript output
-DELIM = "|||"
-RECORD_DELIM = "==="
+# Separators for structured AppleScript output.
+#
+# Outlook item fields (subjects, sender names, attachment names, bodies) are
+# chosen by whoever sent the mail. Printable separators such as "|||" could be
+# planted in a subject to forge record and field boundaries (fake entry_id,
+# fake sender). So the separators are ASCII control characters, and every
+# field value is passed through the AppleScript handler `sf` (SANITIZE_HANDLER,
+# prepended to every script by AppleScriptBridge.run), which removes them.
+DELIM = "\x01"           # SOH: between fields
+RECORD_DELIM = "\x02"    # STX: between records
+# (Not ASCII 28-31: Python treats those as whitespace, so str.strip() and
+# str.splitlines() would eat separators and shift fields.)
+# The same separators as AppleScript expressions, for building scripts.
+AS_DELIM = "(character id 1)"
+AS_RECORD_DELIM = "(character id 2)"
+
+SANITIZE_HANDLER = """on sf(v)
+\tif v is missing value then return ""
+\ttry
+\t\tset t to v as text
+\ton error
+\t\treturn ""
+\tend try
+\tset od to AppleScript's text item delimiters
+\tset AppleScript's text item delimiters to {character id 1, character id 2}
+\tset parts to text items of t
+\tset AppleScript's text item delimiters to " "
+\tset t to parts as text
+\tset AppleScript's text item delimiters to od
+\treturn t
+end sf
+"""
