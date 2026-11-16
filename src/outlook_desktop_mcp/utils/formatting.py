@@ -22,26 +22,78 @@ def strip_html(html: str) -> str:
     return text
 
 
+def _safe(item, name: str, default=None):
+    """Read a COM property, returning default when the item type lacks it.
+
+    Mail folders also hold MeetingItem, ReportItem (delivery/read receipts)
+    and similar items that are missing some MailItem properties. On a
+    late-bound pywin32 object, reading one raises AttributeError (e.g.
+    "GetItemFromID.To"); some properties raise com_error instead.
+    getattr(item, name, default) only covers the first case.
+    """
+    try:
+        value = getattr(item, name)
+    except Exception:
+        return default
+    return default if value is None else value
+
+
+_OL_TO = 1
+_OL_CC = 2
+
+
+def _recipients_of_type(item, recipient_type: int) -> str:
+    """Build a "; "-joined recipient list from item.Recipients."""
+    names = []
+    try:
+        recipients = item.Recipients
+        for i in range(recipients.Count):
+            r = recipients.Item(i + 1)
+            if r.Type == recipient_type:
+                names.append(r.Name)
+    except Exception:
+        pass
+    return "; ".join(names)
+
+
+def _attachment_count(item) -> int:
+    try:
+        return int(item.Attachments.Count)
+    except Exception:
+        return 0
+
+
 def format_email_summary(item) -> dict:
-    """Extract key fields from an Outlook MailItem into a dict."""
+    """Extract key fields from a MailItem (or other item in a mail folder)."""
+    received = _safe(item, "ReceivedTime") or _safe(item, "CreationTime")
+    attachment_count = _attachment_count(item)
     return {
         "entry_id": item.EntryID,
-        "subject": item.Subject or "(no subject)",
-        "sender": getattr(item, "SenderEmailAddress", "unknown"),
-        "sender_name": getattr(item, "SenderName", "unknown"),
-        "received_time": str(item.ReceivedTime),
-        "unread": bool(item.UnRead),
-        "has_attachments": bool(item.Attachments.Count > 0),
-        "attachment_count": item.Attachments.Count,
+        "subject": _safe(item, "Subject") or "(no subject)",
+        "sender": _safe(item, "SenderEmailAddress", "unknown"),
+        "sender_name": _safe(item, "SenderName", "unknown"),
+        "received_time": str(received) if received is not None else None,
+        "unread": bool(_safe(item, "UnRead", False)),
+        "has_attachments": attachment_count > 0,
+        "attachment_count": attachment_count,
     }
 
 
 def format_email_full(item, body_max_length: int = 5000) -> dict:
-    """Extract full email details including body."""
+    """Extract full email details including body.
+
+    Works for meeting requests and delivery reports too: those have no
+    To/CC properties, so the lists are rebuilt from item.Recipients.
+    message_class (e.g. "IPM.Schedule.Meeting.Request") tells the caller
+    what kind of item it is.
+    """
     result = format_email_summary(item)
-    result["to"] = item.To or ""
-    result["cc"] = item.CC or ""
-    result["body"] = truncate(item.Body or "", body_max_length)
+    result["message_class"] = _safe(item, "MessageClass", "")
+    to = _safe(item, "To")
+    cc = _safe(item, "CC")
+    result["to"] = to if to is not None else _recipients_of_type(item, _OL_TO)
+    result["cc"] = cc if cc is not None else _recipients_of_type(item, _OL_CC)
+    result["body"] = truncate(_safe(item, "Body", ""), body_max_length)
     return result
 
 
