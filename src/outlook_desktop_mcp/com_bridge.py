@@ -30,13 +30,14 @@ logger = logging.getLogger("outlook_desktop_mcp.com_bridge")
 CALL_TIMEOUT_SECONDS = 60
 
 # HRESULTs meaning the Outlook COM server is gone/disconnected (compared masked
-# to unsigned 32 bits).
+# to unsigned 32 bits). Only codes where the failed call did not run (or the
+# object was already dead) are listed, so a retry cannot repeat side effects
+# such as sending mail. RPC_E_SERVER_DIED (0x80010007) and RPC_S_CALL_FAILED
+# (0x800706BE) are deliberately excluded: "the call may have executed".
 DISCONNECT_HRESULTS = frozenset({
     0x80010108,  # RPC_E_DISCONNECTED
-    0x80010007,  # RPC_E_SERVER_DIED
     0x80010012,  # RPC_E_SERVER_DIED_DNE
     0x800706BA,  # RPC_S_SERVER_UNAVAILABLE
-    0x800706BE,  # RPC_S_CALL_FAILED
     0x800706BF,  # RPC_S_CALL_FAILED_DNE
     0x800401FD,  # CO_E_OBJNOTCONNECTED
 })
