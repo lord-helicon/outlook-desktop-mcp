@@ -1232,6 +1232,21 @@ def _outlook_date_literal(dt: datetime) -> str:
     return _format_locale_datetime(dt)
 
 
+def _event_overlap_filter(start: datetime, end: datetime) -> str:
+    """Jet Restrict() filter for events overlapping [start, end].
+
+    Uses an overlap test (event starts before the range ends AND ends after
+    the range starts) so events already in progress at ``start`` are included,
+    not just events that begin inside the range. Results stay sorted by
+    [Start], so count-limiting after the Restrict still returns the earliest
+    matching events.
+    """
+    return (
+        f"[Start] <= '{_outlook_date_literal(end)}' "
+        f"AND [End] >= '{_outlook_date_literal(start)}'"
+    )
+
+
 def _outlook_dasl_date_literal(dt: datetime) -> str:
     """Date literal for a DASL Restrict() filter (a property referenced by
     namespace, e.g. ``urn:schemas:httpmail:datereceived``).
@@ -1303,11 +1318,7 @@ async def list_events(
         start = _parse_date(start_date) if start_date else datetime.now()
         end = _parse_date(end_date) if end_date else start + timedelta(days=7)
 
-        restrict = (
-            f"[Start] >= '{_outlook_date_literal(start)}' "
-            f"AND [Start] <= '{_outlook_date_literal(end)}'"
-        )
-        filtered = items.Restrict(restrict)
+        filtered = items.Restrict(_event_overlap_filter(start, end))
 
         results = []
         n = 0
@@ -1818,11 +1829,7 @@ async def search_events(
         start = _parse_date(start_date) if start_date else datetime.now() - timedelta(days=30)
         end = _parse_date(end_date) if end_date else datetime.now() + timedelta(days=30)
 
-        restrict = (
-            f"[Start] >= '{_outlook_date_literal(start)}' "
-            f"AND [Start] <= '{_outlook_date_literal(end)}'"
-        )
-        filtered = items.Restrict(restrict)
+        filtered = items.Restrict(_event_overlap_filter(start, end))
 
         query_lower = query.lower()
         results = []
