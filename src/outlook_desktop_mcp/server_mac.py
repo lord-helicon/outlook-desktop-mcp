@@ -212,6 +212,8 @@ def _is_ui_access_denied(error: BaseException) -> bool:
 
 # Extra rows read per list: date group headers ("Today", ...) are rows too.
 _UI_HEADER_ALLOWANCE = 5
+# Rows scanned for unread_only in the UI fallback.
+_UI_UNREAD_SCAN_ROWS = 50
 
 
 def _ui_scope(layout: dict, inner: str, *, pane: bool = False) -> str:
@@ -233,7 +235,7 @@ def _ui_scope(layout: dict, inner: str, *, pane: bool = False) -> str:
     return "\n".join(lines)
 
 
-async def _ui_list_messages(bridge_obj, count: int = 10) -> list[dict]:
+async def _ui_list_messages(bridge_obj, count: int = 10, unread_only: bool = False) -> list[dict]:
     """Read visible inbox messages via UI scripting (System Events).
 
     This is the fallback for New Outlook for Mac where AppleScript's inbox
@@ -241,6 +243,10 @@ async def _ui_list_messages(bridge_obj, count: int = 10) -> list[dict]:
     """
     # Read a few extra rows: date group headers take up rows too.
     max_rows = count + _UI_HEADER_ALLOWANCE
+    if unread_only:
+        # Unread messages can be anywhere in the list; scan a fixed window
+        # (reading rows through the UI costs ~0.3 s each).
+        max_rows = max(max_rows, _UI_UNREAD_SCAN_ROWS)
     rows_script = (
         'set rowList to rows\n'
         'set rowCount to count of rowList\n'
@@ -353,6 +359,8 @@ async def _ui_list_messages(bridge_obj, count: int = 10) -> list[dict]:
             "_source": "ui_scraping",
         })
 
+    if unread_only:
+        results = [r for r in results if r["unread"]]
     return results[:count]
 
 
@@ -909,6 +917,8 @@ async def list_emails(
             "outbox", or any custom folder name visible in list_folders output.
         count: Maximum number of emails to return. Default 10, max recommended 50.
         unread_only: If true, only return unread emails. Default false.
+            In New Outlook (inbox read from the window) only the first 50
+            rows are scanned.
 
     Returns:
         JSON array of email summary objects.
@@ -1032,7 +1042,10 @@ end tell'''
         # for the inbox, try reading the visible message list via UI scripting.
         if not results and folder.lower().strip() == "inbox":
             try:
-                results = await _ui_list_messages(bridge, count)
+                results = await _ui_list_messages(bridge, count, unread_only)
+                # The window was read, so an empty list is a real answer
+                # (e.g. no unread mail), not a sign of a hidden mailbox.
+                return json.dumps(results, indent=2, default=str)
             except Exception as e:
                 if _is_ui_access_denied(e):
                     return f"Error listing emails: {UI_ACCESS_DENIED_MESSAGE}"

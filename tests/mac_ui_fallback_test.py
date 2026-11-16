@@ -121,6 +121,30 @@ def test_flat_layout_used_when_others_fail():
     check("list_emails returns the row", len(res) == 1, str(res))
 
 
+def test_unread_only_in_ui_fallback():
+    log("--- unread_only filters the window-read inbox ---")
+    raw = (row("Ann", "Old news") + RECORD_DELIM + row("Bob", "New thing", unread=True) + RECORD_DELIM
+           + row("Cy", "Older") + RECORD_DELIM)
+
+    def handler(script):
+        if "count of exchange accounts" in script:
+            return "0"  # New Outlook: no AppleScript-visible account
+        return raw if "System Events" in script else ""
+    fake = FakeBridge(handler=handler)
+    server_mac.bridge = fake
+    res = json.loads(asyncio.run(server_mac.list_emails(folder="inbox", count=5, unread_only=True)))
+    check("only the unread message returned", [r["sender_name"] for r in res] == ["Bob"], str(res))
+    check("its id keeps row number 2", res and res[0]["entry_id"].startswith("ui-2-"), str(res))
+    ui = [x for x in fake.scripts if "System Events" in x]
+    check("scans at least 50 rows for unread_only", ui and "if maxRows > 50 then" in ui[-1], ui[-1][:80] if ui else "")
+    res = json.loads(asyncio.run(server_mac.list_emails(folder="inbox", count=5)))
+    check("without unread_only all 3 returned", len(res) == 3, str(res))
+
+    raw = row("Ann", "Old news") + RECORD_DELIM
+    out = asyncio.run(server_mac.list_emails(folder="inbox", count=5, unread_only=True))
+    check("no unread mail -> plain [] (no New Outlook note: the window was read)", json.loads(out) == [], out[:120])
+
+
 def test_date_group_headers_skipped():
     log("--- date group header rows are skipped, row numbers kept ---")
     raw = "Today, Monday" + RECORD_DELIM + ROW + RECORD_DELIM + "Last week" + RECORD_DELIM + \
@@ -432,6 +456,7 @@ def main():
     test_list_falls_back_to_new_layout()
     test_flat_layout_used_when_others_fail()
     test_date_group_headers_skipped()
+    test_unread_only_in_ui_fallback()
     test_list_emails_uses_ui_fallback()
     test_missing_accessibility_is_reported()
     test_empty_results_explain_new_outlook()
