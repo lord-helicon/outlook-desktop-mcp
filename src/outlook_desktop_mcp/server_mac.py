@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import asyncio
+import hashlib
 
 from mcp.server.fastmcp import FastMCP
 
@@ -46,7 +47,7 @@ def _bad_message_id(message_id: str, kind: str = "message") -> str | None:
     digits would be evaluated as script. `kind` only affects the message.
     """
     s = message_id.strip()
-    if s.startswith("ui-") and s[3:].isascii() and s[3:].isdigit():
+    if re.fullmatch(r"ui-[0-9]+(?:-[0-9a-f]{8})?", s):
         return (
             f"Error: '{message_id}' came from UI scraping (New Outlook) and "
             f"cannot be used as a {kind} id; only read_email accepts ui-N ids."
@@ -172,6 +173,8 @@ async def _ui_list_messages(bridge_obj, count: int = 10) -> list[dict]:
         '    try\n'
         '        set cellDesc to description of UI element 1 of r\n'
         f'        set output to output & cellDesc & "{RECORD_DELIM}"\n'
+        '    on error\n'
+        f'        set output to output & "{RECORD_DELIM}"\n'
         '    end try\n'
         'end repeat\n'
         'return output'
@@ -254,7 +257,7 @@ async def _ui_list_messages(bridge_obj, count: int = 10) -> list[dict]:
             subject = ss.strip()
 
         results.append({
-            "entry_id": f"ui-{idx}",
+            "entry_id": f"ui-{idx}-{_ui_fingerprint(sender, subject, time_str)}",
             "subject": subject or "(could not parse subject)",
             "sender": "",
             "sender_name": sender,
@@ -269,6 +272,38 @@ async def _ui_list_messages(bridge_obj, count: int = 10) -> list[dict]:
 
 
 _UI_PANE_SETTLE_SECONDS = 1.5
+
+# How many rows read_email scans to find a message that moved since list_emails.
+_UI_LOOKUP_ROWS = 50
+_UI_ID_RE = re.compile(r"ui-([0-9]+)-([0-9a-f]{8})")
+
+
+def _ui_fingerprint(sender: str, subject: str, time_str: str) -> str:
+    """Short hash of a scraped row's stable fields.
+
+    ui-N ids are row positions, which shift when mail arrives or the list is
+    re-sorted. The fingerprint lets read_email check that row N still shows
+    the message list_emails returned (and find it if it moved). Read state
+    and flags are excluded because selecting a row can change them.
+    """
+    key = "\x1f".join((sender, subject, time_str)).encode("utf-8")
+    return hashlib.sha1(key).hexdigest()[:8]
+
+
+async def _ui_resolve_row(bridge_obj, row_number: int, fingerprint: str) -> int | None:
+    """Current row of the message with this fingerprint, or None if gone.
+
+    Prefers the original row; otherwise the matching row nearest to it.
+    """
+    rows = await _ui_list_messages(bridge_obj, max(row_number, _UI_LOOKUP_ROWS))
+    matches = []
+    for r in rows:
+        m = _UI_ID_RE.fullmatch(r["entry_id"])
+        if m and m.group(2) == fingerprint:
+            matches.append(int(m.group(1)))
+    if not matches:
+        return None
+    return min(matches, key=lambda n: abs(n - row_number))
 
 _UI_READ_PANE_SCRIPT = """set emailSubject to ""
 try
@@ -945,12 +980,29 @@ async def read_email(
     """
     if entry_id:
         entry_id = entry_id.strip()
-        # UI-scraped ids ("ui-N", from the New Outlook fallback in
-        # list_emails) are row positions, not Outlook ids: read via the pane.
-        ui_match = re.fullmatch(r"ui-([0-9]+)", entry_id)
+        # UI-scraped ids ("ui-N-<fingerprint>", from the New Outlook fallback
+        # in list_emails) are row positions, not Outlook ids: read via the
+        # pane after checking the row still holds the same message.
+        ui_match = re.fullmatch(r"ui-([0-9]+)(?:-([0-9a-f]{8}))?", entry_id)
         if ui_match and int(ui_match.group(1)) >= 1:
+            row_number, fingerprint = int(ui_match.group(1)), ui_match.group(2)
+            if not fingerprint:
+                return json.dumps({"error": (
+                    f"'{entry_id}' has no row fingerprint, so it could open the "
+                    "wrong message. Call list_emails again and use the new id."
+                )})
             try:
-                result = await _ui_read_email_by_row(bridge, int(ui_match.group(1)))
+                current = await _ui_resolve_row(bridge, row_number, fingerprint)
+                if current is None:
+                    result = {"error": (
+                        f"The message for '{entry_id}' is no longer in the first "
+                        f"{max(row_number, _UI_LOOKUP_ROWS)} rows of the message "
+                        "list. Call list_emails again."
+                    )}
+                else:
+                    result = await _ui_read_email_by_row(bridge, current)
+                    if "error" not in result:
+                        result["entry_id"] = f"ui-{current}-{fingerprint}"
             except Exception as e:
                 result = {"error": f"Failed to read UI email: {e}"}
             if "error" in result:
