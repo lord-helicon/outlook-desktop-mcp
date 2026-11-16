@@ -607,6 +607,112 @@ async def send_draft(
         return f"Error sending draft: {format_com_error(e)}"
 
 
+# --- Mail listing helpers: Outlook Table fast path with Items fallback ---
+
+# PR_HASATTACH (boolean). Table rows cannot return Attachments.Count, so the
+# MAPI property is used to derive has_attachments instead.
+_PR_HASATTACH_DASL = "http://schemas.microsoft.com/mapi/proptag/0x0E1B000B"
+
+# Column order matters: _table_row_to_summary() reads row.GetValues() positionally.
+_MAIL_TABLE_COLUMNS = (
+    "EntryID",
+    "Subject",
+    "SenderEmailAddress",
+    "SenderName",
+    "ReceivedTime",
+    "UnRead",
+    _PR_HASATTACH_DASL,
+)
+
+
+def _safe_dasl_phrase(query: str) -> str:
+    """Escape a value for a DASL ci_phrasematch literal.
+
+    Unlike LIKE, ci_phrasematch has no wildcard characters, so only the quote
+    characters are escaped (same quote handling as _safe_dasl).
+    """
+    return query.replace("'", "''").replace('"', '""')
+
+
+def _table_row_to_summary(values) -> dict:
+    """Map a Table row (GetValues() tuple in _MAIL_TABLE_COLUMNS order) to the
+    same keys/value formats as utils.formatting.format_email_summary.
+
+    attachment_count is None: the Table API cannot return Attachments.Count
+    (only the PR_HASATTACH flag is available).
+    """
+    entry_id, subject, sender, sender_name, received, unread, has_attach = values
+    return {
+        "entry_id": entry_id,
+        "subject": subject or "(no subject)",
+        "sender": sender if sender is not None else "unknown",
+        "sender_name": sender_name if sender_name is not None else "unknown",
+        "received_time": str(received),
+        "unread": bool(unread),
+        "has_attachments": bool(has_attach),
+        "attachment_count": None,
+    }
+
+
+def _list_mail_via_table(folder, filter_str: str, count: int) -> list:
+    """Fetch up to ``count`` newest mail summaries through Folder.GetTable().
+
+    Raises on any failure so the caller can fall back to the Items path.
+    """
+    table = folder.GetTable(filter_str, 0) if filter_str else folder.GetTable("", 0)
+    table.Columns.RemoveAll()
+    for col in _MAIL_TABLE_COLUMNS:
+        table.Columns.Add(col)
+    table.Sort("[ReceivedTime]", True)
+    results = []
+    while len(results) < count:
+        row = table.GetNextRow()
+        if row is None:
+            break
+        results.append(_table_row_to_summary(row.GetValues()))
+    return results
+
+
+def _list_mail_via_items(folder, filter_str: str, count: int, restrict_first: bool) -> list:
+    """Original Items-based path (slow: one COM round-trip per property).
+
+    ``restrict_first`` keeps the historical ordering of Sort/Restrict calls
+    (list_emails sorts then restricts; search_emails restricts then sorts).
+    """
+    items = folder.Items
+    if restrict_first:
+        if filter_str:
+            items = items.Restrict(filter_str)
+        items.Sort("[ReceivedTime]", True)
+    else:
+        items.Sort("[ReceivedTime]", True)
+        if filter_str:
+            items = items.Restrict(filter_str)
+    results = []
+    limit = min(count, items.Count)
+    for i in range(limit):
+        try:
+            results.append(format_email_summary(items.Item(i + 1)))
+        except Exception:
+            continue
+    return results
+
+
+def _list_mail(folder, filter_str: str, count: int, restrict_first: bool) -> list:
+    try:
+        return _list_mail_via_table(folder, filter_str, count)
+    except Exception as e:
+        logger.debug("Table path failed (%s); falling back to Items", e)
+    return _list_mail_via_items(folder, filter_str, count, restrict_first)
+
+
+def _instant_search_enabled(folder) -> bool:
+    try:
+        return bool(folder.Store.IsInstantSearchEnabled)
+    except Exception:
+        return False
+
+
 # =====================================================================
 # TOOL 2: list_emails
 # =====================================================================
@@ -644,7 +750,8 @@ async def list_emails(
             Default: primary account. Use list_accounts to see available accounts.
 
     Returns:
-        JSON array of email summary objects.
+        JSON array of email summary objects. attachment_count may be null
+        (has_attachments is always set).
     """
     def _list(outlook, namespace, folder, count, unread_only, start_date, end_date, account):
         count = min(max(1, count), 200)
@@ -652,9 +759,6 @@ async def list_emails(
         target = _resolve_folder(namespace, folder, store)
         if not target:
             return json.dumps({"error": f"Folder '{folder}' not found"})
-
-        items = target.Items
-        items.Sort("[ReceivedTime]", True)
 
         # Build restriction filters
         restrictions = []
@@ -670,16 +774,7 @@ async def list_emails(
             # Default end to now when start is specified
             restrictions.append(f"[ReceivedTime] <= '{_outlook_date_literal(datetime.now())}'")
 
-        if restrictions:
-            items = items.Restrict(" AND ".join(restrictions))
-
-        results = []
-        limit = min(count, items.Count)
-        for i in range(limit):
-            try:
-                results.append(format_email_summary(items.Item(i + 1)))
-            except Exception:
-                continue
+        results = _list_mail(target, " AND ".join(restrictions), count, restrict_first=False)
         return json.dumps(results, indent=2, default=str)
 
     try:
@@ -1108,11 +1203,17 @@ async def search_emails(
     """Search for emails in Outlook using text search.
 
     Searches email subjects and bodies using Outlook's DASL filter.
+    When the mailbox store has Windows/Outlook Instant Search enabled, the
+    fast indexed ci_phrasematch predicate is used, which matches whole words
+    or phrases (e.g. "budget" matches "Budget report" but not "budgets" or
+    "subbudget"). When Instant Search is off, a slower LIKE '%query%'
+    arbitrary-substring match is used.
     Results are sorted by received time (newest first). Each result
     includes entry_id for further operations.
 
     Args:
-        query: The search term (case-insensitive substring match).
+        query: The search term (case-insensitive; whole-word/phrase match when
+            Instant Search is enabled, substring match otherwise).
             Examples: "budget report", "meeting notes", "quarterly".
         folder: Folder to search in. Default "inbox". Supports same
             names as list_emails.
@@ -1134,11 +1235,18 @@ async def search_emails(
         if not target:
             return json.dumps({"error": f"Folder '{folder}' not found"})
 
-        safe_query = _safe_dasl(query)
-        dasl_parts = [
-            f"(\"urn:schemas:httpmail:subject\" LIKE '%{safe_query}%' OR "
-            f"\"urn:schemas:httpmail:textdescription\" LIKE '%{safe_query}%')"
-        ]
+        if _instant_search_enabled(target):
+            pq = _safe_dasl_phrase(query)
+            dasl_parts = [
+                f"(\"urn:schemas:httpmail:subject\" ci_phrasematch '{pq}' OR "
+                f"\"urn:schemas:httpmail:textdescription\" ci_phrasematch '{pq}')"
+            ]
+        else:
+            safe_query = _safe_dasl(query)
+            dasl_parts = [
+                f"(\"urn:schemas:httpmail:subject\" LIKE '%{safe_query}%' OR "
+                f"\"urn:schemas:httpmail:textdescription\" LIKE '%{safe_query}%')"
+            ]
         if start_date:
             start = _parse_date(start_date)
             dasl_parts.append(
@@ -1155,16 +1263,7 @@ async def search_emails(
             )
 
         filter_str = "@SQL=" + " AND ".join(dasl_parts)
-        items = target.Items.Restrict(filter_str)
-        items.Sort("[ReceivedTime]", True)
-
-        results = []
-        limit = min(count, items.Count)
-        for i in range(limit):
-            try:
-                results.append(format_email_summary(items.Item(i + 1)))
-            except Exception:
-                continue
+        results = _list_mail(target, filter_str, count, restrict_first=True)
         return json.dumps(results, indent=2, default=str)
 
     try:
