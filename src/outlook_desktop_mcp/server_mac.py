@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import asyncio
 
 from mcp.server.fastmcp import FastMCP
 
@@ -37,14 +38,21 @@ logging.basicConfig(
 logger = logging.getLogger("outlook_desktop_mcp")
 
 
-def _bad_message_id(message_id: str) -> str | None:
+def _bad_message_id(message_id: str, kind: str = "message") -> str | None:
     """Return an error if message_id is not a plain Outlook numeric id.
 
-    The id is interpolated unquoted into AppleScript (`message id {id}`),
-    so anything other than digits would be evaluated as script.
+    The id is interpolated unquoted into AppleScript (`message id {id}`,
+    `calendar event id {id}`, `task id {id}`), so anything other than ASCII
+    digits would be evaluated as script. `kind` only affects the message.
     """
-    if not message_id.strip().isdigit():
-        return f"Error: '{message_id}' is not a valid Outlook message id (expected digits)."
+    s = message_id.strip()
+    if s.startswith("ui-") and s[3:].isascii() and s[3:].isdigit():
+        return (
+            f"Error: '{message_id}' came from UI scraping (New Outlook) and "
+            f"cannot be used as a {kind} id; only read_email accepts ui-N ids."
+        )
+    if not (s.isascii() and s.isdigit()):
+        return f"Error: '{message_id}' is not a valid Outlook {kind} id (expected digits)."
     return None
 
 # --- MCP Server ---
@@ -119,29 +127,32 @@ async def _run_with_fallback(fast_script: str, legacy_script: str) -> str:
 # the message list table visible in the Outlook window.
 
 
-_UI_MESSAGE_LIST_PATH = (
-    'tell application "System Events"\n'
-    '    tell process "Microsoft Outlook"\n'
-    '        tell window 1\n'
-    '            tell splitter group 1\n'
-    '                tell splitter group 1\n'
-    '                    tell splitter group 1\n'
-    '                        tell group 1\n'
-    '                            tell scroll area 1\n'
-    '                                tell table 1\n'
+# Element chains from `window 1` down to the message table. The layout
+# differs between Outlook builds: New Outlook has four nested splitter groups
+# and an extra `UI element` wrapper; older builds have three and no wrapper.
+# These are System Events class names (not localized UI strings), so they do
+# not depend on the macOS language. Each variant is tried in order.
+_UI_LAYOUTS = (
+    # (splitter group depth, wrapper elements between `group 1` and the table)
+    {"name": "new", "splitters": 4, "wrappers": ("UI element 1",)},
+    {"name": "legacy", "splitters": 3, "wrappers": ()},
 )
 
-_UI_MESSAGE_LIST_END = (
-    '                                end tell\n'
-    '                            end tell\n'
-    '                        end tell\n'
-    '                    end tell\n'
-    '                end tell\n'
-    '            end tell\n'
-    '        end tell\n'
-    '    end tell\n'
-    'end tell'
-)
+
+def _ui_scope(layout: dict, inner: str, *, pane: bool = False) -> str:
+    """Wrap `inner` in nested System Events `tell` blocks for a layout.
+
+    pane=False targets the message table (`... group 1 > wrappers > scroll
+    area 1 > table 1`); pane=True stops at the innermost splitter group,
+    whose children are the list (group 1), header (group 2) and body (group 3).
+    """
+    chain = ["application \"System Events\"", "process \"Microsoft Outlook\"",
+             "window 1"]
+    chain += ["splitter group 1"] * layout["splitters"]
+    if not pane:
+        chain += ["group 1", *layout["wrappers"], "scroll area 1", "table 1"]
+    lines = [f"tell {c}" for c in chain] + [inner] + ["end tell"] * len(chain)
+    return "\n".join(lines)
 
 
 async def _ui_list_messages(bridge_obj, count: int = 10) -> list[dict]:
@@ -150,26 +161,37 @@ async def _ui_list_messages(bridge_obj, count: int = 10) -> list[dict]:
     This is the fallback for New Outlook for Mac where AppleScript's inbox
     keyword only sees the empty local mailbox.
     """
-    script = (
-        _UI_MESSAGE_LIST_PATH +
-        f'                                    set rowList to rows\n'
-        f'                                    set rowCount to count of rowList\n'
-        f'                                    set maxRows to rowCount\n'
-        f'                                    if maxRows > {count} then set maxRows to {count}\n'
-        f'                                    set output to ""\n'
-        f'                                    repeat with i from 1 to maxRows\n'
-        f'                                        set r to row i\n'
-        f'                                        try\n'
-        f'                                            set cellDesc to description of UI element 1 of r\n'
-        f'                                            set output to output & cellDesc & "{RECORD_DELIM}"\n'
-        f'                                        end try\n'
-        f'                                    end repeat\n'
-        f'                                    return output\n' +
-        _UI_MESSAGE_LIST_END
+    rows_script = (
+        'set rowList to rows\n'
+        'set rowCount to count of rowList\n'
+        'set maxRows to rowCount\n'
+        f'if maxRows > {count} then set maxRows to {count}\n'
+        'set output to ""\n'
+        'repeat with i from 1 to maxRows\n'
+        '    set r to row i\n'
+        '    try\n'
+        '        set cellDesc to description of UI element 1 of r\n'
+        f'        set output to output & cellDesc & "{RECORD_DELIM}"\n'
+        '    end try\n'
+        'end repeat\n'
+        'return output'
     )
 
-    raw = await bridge_obj.run(script)
-    if not raw:
+    raw = ""
+    last_error: Exception | None = None
+    succeeded = False
+    for layout in _UI_LAYOUTS:
+        try:
+            raw = await bridge_obj.run(_ui_scope(layout, rows_script))
+            succeeded = True
+        except Exception as e:  # wrong element path for this build -> try next
+            last_error = e
+            continue
+        if raw and raw.strip():
+            break
+    if not succeeded and last_error is not None:
+        raise last_error
+    if not raw or not raw.strip():
         return []
 
     results = []
@@ -244,6 +266,109 @@ async def _ui_list_messages(bridge_obj, count: int = 10) -> list[dict]:
         })
 
     return results
+
+
+_UI_PANE_SETTLE_SECONDS = 1.5
+
+_UI_READ_PANE_SCRIPT = """set emailSubject to ""
+try
+    set emailSubject to value of static text 1 of group 2
+end try
+-- Header fields are matched by text prefix, not index: buttons, CC lines and
+-- presence indicators shift positions between messages.
+set emailFrom to ""
+set emailDate to ""
+set emailTo to ""
+try
+    tell scroll area 1 of group 2
+        repeat with hElem in (every UI element)
+            try
+                set hRole to role of hElem
+                set hVal to ""
+                try
+                    set hVal to value of hElem as text
+                end try
+                set hName to ""
+                try
+                    set hName to name of hElem as text
+                end try
+                if hVal starts with "From: " then
+                    set emailFrom to text 7 thru -1 of hVal
+                else if hVal starts with "Recipients: " then
+                    set emailTo to text 13 thru -1 of hVal
+                else if hRole is "AXUnknown" and hName starts with "Sent on: " then
+                    set emailDate to hVal
+                end if
+            end try
+        end repeat
+    end tell
+end try
+-- Body is an AXWebArea. `entire contents` must be materialized into a
+-- variable first; iterating it inline yields nothing.
+set emailBody to ""
+try
+    tell group 3 to tell group 1 to tell scroll area 1 to tell UI element 1
+        set allElems to entire contents
+        repeat with e in allElems
+            try
+                if role of e is "AXStaticText" then
+                    set emailBody to emailBody & (value of e as text) & return
+                end if
+            end try
+        end repeat
+    end tell
+end try
+return emailSubject & "__D__" & emailFrom & "__D__" & emailDate & "__D__" & emailTo & "__D__" & emailBody""".replace("__D__", DELIM)
+
+
+async def _ui_read_email_by_row(bridge_obj, row_number: int) -> dict:
+    """Read a message by selecting its row and scraping the reading pane.
+
+    Note: UI ids are row positions at list time; if mail arrives in between,
+    the row may now hold a different message. Header prefixes ("From: ",
+    "Recipients: ", "Sent on: ") are English-only; subject and body are not.
+    """
+    select_script = (
+        f'select row {row_number}\n'
+        f'set selected of row {row_number} to true'
+    )
+    chosen = None
+    last_error: Exception | None = None
+    for layout in _UI_LAYOUTS:
+        try:
+            await bridge_obj.run(_ui_scope(layout, select_script))
+            chosen = layout
+            break
+        except Exception as e:
+            last_error = e
+    if chosen is None:
+        return {"error": f"Failed to select row {row_number}: {last_error}"}
+
+    await asyncio.sleep(_UI_PANE_SETTLE_SECONDS)  # let the reading pane load
+
+    try:
+        raw = await bridge_obj.run(_ui_scope(chosen, _UI_READ_PANE_SCRIPT, pane=True))
+    except Exception as e:
+        return {"error": f"Failed to read email content: {e}"}
+    if not raw:
+        return {"error": "No data returned from reading pane"}
+    parts = raw.split(DELIM)
+    if len(parts) < 5:
+        return {"error": f"Unexpected data format: {raw}"}
+    return {
+        "entry_id": f"ui-{row_number}",
+        "subject": _clean(parts[0]),
+        "sender": _clean(parts[1]),
+        "sender_name": _clean(parts[1]),
+        "received_time": _clean(parts[2]),
+        "to": _clean(parts[3]),
+        "cc": "",
+        "body": _truncate(_clean(DELIM.join(parts[4:]))),
+        "unread": False,
+        "has_attachments": False,
+        "attachment_count": 0,
+        "_source": "ui_scraping_read",
+    }
 
 
 # =====================================================================
@@ -819,6 +944,20 @@ async def read_email(
         sender_name, received_time, unread, to, cc, body, attachment info).
     """
     if entry_id:
+        entry_id = entry_id.strip()
+        # UI-scraped ids ("ui-N", from the New Outlook fallback in
+        # list_emails) are row positions, not Outlook ids: read via the pane.
+        ui_match = re.fullmatch(r"ui-([0-9]+)", entry_id)
+        if ui_match and int(ui_match.group(1)) >= 1:
+            try:
+                result = await _ui_read_email_by_row(bridge, int(ui_match.group(1)))
+            except Exception as e:
+                result = {"error": f"Failed to read UI email: {e}"}
+            if "error" in result:
+                return json.dumps(result)
+            return json.dumps(result, indent=2, default=str)
+        if err := _bad_message_id(entry_id):
+            return err
         folder_ref = resolve_folder_ref(folder)
         script = f'''tell application "Microsoft Outlook"
     set m to message id {entry_id}
@@ -951,6 +1090,9 @@ async def mark_as_read(entry_id: str) -> str:
     Returns:
         Confirmation message with the email subject, or an error.
     """
+    if err := _bad_message_id(entry_id):
+        return err
+    entry_id = entry_id.strip()
     script = f'''tell application "Microsoft Outlook"
     set m to message id {entry_id}
     set is read of m to true
@@ -982,6 +1124,9 @@ async def mark_as_unread(entry_id: str) -> str:
     Returns:
         Confirmation message with the email subject, or an error.
     """
+    if err := _bad_message_id(entry_id):
+        return err
+    entry_id = entry_id.strip()
     script = f'''tell application "Microsoft Outlook"
     set m to message id {entry_id}
     set is read of m to false
@@ -1020,6 +1165,9 @@ async def move_email(
         Confirmation with email subject and destination, or an error.
     """
     dest_ref = resolve_folder_ref(target_folder)
+    if err := _bad_message_id(entry_id):
+        return err
+    entry_id = entry_id.strip()
     script = f'''tell application "Microsoft Outlook"
     set m to message id {entry_id}
     set msubject to subject of m
@@ -1060,6 +1208,9 @@ async def reply_email(
         Confirmation indicating the reply was sent, or an error.
     """
     reply_cmd = "reply all to" if reply_all else "reply to"
+    if err := _bad_message_id(entry_id):
+        return err
+    entry_id = entry_id.strip()
     script = f'''tell application "Microsoft Outlook"
     set m to message id {entry_id}
     set msubject to subject of m
@@ -1641,6 +1792,9 @@ async def get_event(entry_id: str) -> str:
     Returns:
         JSON object with full event details.
     """
+    if err := _bad_message_id(entry_id, "event"):
+        return err
+    entry_id = entry_id.strip()
     script = f'''tell application "Microsoft Outlook"
     set e to calendar event id {entry_id}
     set eid to id of e
@@ -1870,6 +2024,9 @@ async def update_event(
     if not set_lines:
         return json.dumps({"error": "No fields to update"})
 
+    if err := _bad_message_id(entry_id, "event"):
+        return err
+    entry_id = entry_id.strip()
     script = f'''tell application "Microsoft Outlook"
     set e to calendar event id {entry_id}
     {set_lines}
@@ -1909,6 +2066,9 @@ async def delete_event(entry_id: str) -> str:
     Returns:
         Confirmation with the event subject, or an error.
     """
+    if err := _bad_message_id(entry_id, "event"):
+        return err
+    entry_id = entry_id.strip()
     script = f'''tell application "Microsoft Outlook"
     set e to calendar event id {entry_id}
     set esubject to subject of e
@@ -2176,6 +2336,9 @@ async def get_task(entry_id: str) -> str:
     Returns:
         JSON object with full task details including body.
     """
+    if err := _bad_message_id(entry_id, "task"):
+        return err
+    entry_id = entry_id.strip()
     script = f'''tell application "Microsoft Outlook"
     set t to task id {entry_id}
     set tid to id of t
@@ -2276,6 +2439,9 @@ async def complete_task(entry_id: str) -> str:
     Returns:
         Confirmation with the task subject.
     """
+    if err := _bad_message_id(entry_id, "task"):
+        return err
+    entry_id = entry_id.strip()
     script = f'''tell application "Microsoft Outlook"
     set t to task id {entry_id}
     set todo flag of t to completed
@@ -2299,6 +2465,9 @@ async def delete_task(entry_id: str) -> str:
     Returns:
         Confirmation with the task subject.
     """
+    if err := _bad_message_id(entry_id, "task"):
+        return err
+    entry_id = entry_id.strip()
     script = f'''tell application "Microsoft Outlook"
     set t to task id {entry_id}
     set tname to name of t
@@ -2327,6 +2496,9 @@ async def list_attachments(entry_id: str) -> str:
     Returns:
         JSON array of attachment objects with index and filename.
     """
+    if err := _bad_message_id(entry_id):
+        return err
+    entry_id = entry_id.strip()
     script = f'''tell application "Microsoft Outlook"
     set m to message id {entry_id}
     set attList to attachments of m
@@ -2391,6 +2563,9 @@ async def save_attachment(
     # Use POSIX path for AppleScript
     save_dir_posix = save_directory
 
+    if err := _bad_message_id(entry_id):
+        return err
+    entry_id = entry_id.strip()
     script = f'''tell application "Microsoft Outlook"
     set m to message id {entry_id}
     set attList to attachments of m
