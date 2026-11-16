@@ -1268,14 +1268,14 @@ def _event_overlap_filter(start: datetime, end: datetime) -> str:
     """Jet Restrict() filter for events overlapping [start, end].
 
     Uses an overlap test (event starts before the range ends AND ends after
-    the range starts) so events already in progress at ``start`` are included,
+    the range starts; an event ending exactly at ``start`` is excluded) so events already in progress at ``start`` are included,
     not just events that begin inside the range. Results stay sorted by
     [Start], so count-limiting after the Restrict still returns the earliest
     matching events.
     """
     return (
         f"[Start] <= '{_outlook_date_literal(end)}' "
-        f"AND [End] >= '{_outlook_date_literal(start)}'"
+        f"AND [End] > '{_outlook_date_literal(start)}'"
     )
 
 

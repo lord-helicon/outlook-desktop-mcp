@@ -127,7 +127,7 @@ def test_list_events_uses_overlap_filter_and_keeps_call_order():
     assert log[0][1] == "[Start]"
     # IncludeRecurrences must already be True when Restrict runs.
     assert log[1][2] is True
-    assert log[1][1] == "[Start] <= '08/09/2026 00:00' AND [End] >= '07/09/2026 10:30'", log[1][1]
+    assert log[1][1] == "[Start] <= '08/09/2026 00:00' AND [End] > '07/09/2026 10:30'", log[1][1]
 
 
 def test_search_events_uses_overlap_filter():
@@ -135,7 +135,7 @@ def test_search_events_uses_overlap_filter():
     _use(namespace=ns)
     out = _run(server.search_events("stand", "2026-09-07 10:30", "2026-09-08"))
     assert [e["subject"] for e in json.loads(out)] == ["Standup"]
-    assert log[1][1] == "[Start] <= '08/09/2026 00:00' AND [End] >= '07/09/2026 10:30'", log[1][1]
+    assert log[1][1] == "[Start] <= '08/09/2026 00:00' AND [End] > '07/09/2026 10:30'", log[1][1]
     assert [e[0] for e in log] == ["Sort", "Restrict"]
 
 
