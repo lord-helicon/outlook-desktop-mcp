@@ -182,6 +182,38 @@ def test_missing_accessibility_is_reported():
           "Privacy & Security > Accessibility" in res.get("error", ""), str(res)[:200])
 
 
+def test_empty_results_explain_new_outlook():
+    log("--- empty results explain New Outlook when no account is visible ---")
+    calls = {
+        "list_drafts": lambda: server_mac.list_drafts(),
+        "list_emails (sent items)": lambda: server_mac.list_emails(folder="sent items", count=5),
+        "search_emails": lambda: server_mac.search_emails(query="x"),
+        "list_events": lambda: server_mac.list_events(start_date="2026-11-16", end_date="2026-11-23"),
+        "search_events": lambda: server_mac.search_events(query="x"),
+        "list_tasks": lambda: server_mac.list_tasks(),
+    }
+
+    def accounts(n):
+        def handler(script):
+            if "count of exchange accounts" in script:
+                if n is None:
+                    raise RuntimeError("AppleScript error: timeout")
+                return str(n)
+            return ""  # every query comes back empty
+        return handler
+
+    for name, call in calls.items():
+        server_mac.bridge = FakeBridge(handler=accounts(0))
+        out = asyncio.run(call())
+        check(f"{name}: no accounts -> note", out.startswith("No ") and "Legacy Outlook" in out, out[:120])
+        server_mac.bridge = FakeBridge(handler=accounts(2))
+        out = asyncio.run(call())
+        check(f"{name}: accounts present -> []", json.loads(out) == [], out[:120])
+    server_mac.bridge = FakeBridge(handler=accounts(None))
+    out = asyncio.run(server_mac.list_tasks())
+    check("account check failing -> plain []", json.loads(out) == [], out[:120])
+
+
 def test_fingerprint_ignores_read_state():
     log("--- row fingerprint survives read-state change, keeps positions ---")
     unread = asyncio.run(server_mac._ui_list_messages(
@@ -360,6 +392,7 @@ def main():
     test_list_falls_back_to_new_layout()
     test_list_emails_uses_ui_fallback()
     test_missing_accessibility_is_reported()
+    test_empty_results_explain_new_outlook()
     test_fingerprint_ignores_read_state()
     test_read_email_ui_id()
     test_read_email_numeric_still_works()
