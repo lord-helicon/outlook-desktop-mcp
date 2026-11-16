@@ -32,6 +32,8 @@ class FakeBridge:
         self.output = output
 
     async def run(self, script, timeout=None):
+        if "outline 1 of scroll area 1" in script:
+            return "Inbox; 0 unread messages"  # sidebar folder check
         self.scripts.append(script)
         if self.handler:
             return self.handler(script)
@@ -96,7 +98,10 @@ def test_layouts_generate_both_paths():
     check("legacy: 3 splitters, no wrapper",
           leg.count("tell splitter group 1") == 3
           and "tell group 1\ntell scroll area 1\ntell table 1" in leg, leg)
-    check("tells balanced", new.count("tell ") == new.count("end tell"))
+    chain = new[len(server_mac._UI_MAIN_WINDOW_PREAMBLE):]
+    check("tells balanced", chain.count("tell ") == chain.count("end tell"))
+    check("targets the main window, not the front one",
+          new.startswith(server_mac._UI_MAIN_WINDOW_PREAMBLE) and "tell window mainWinIdx" in new)
     flat = server_mac._ui_scope(server_mac._UI_LAYOUTS[2], "X")
     check("flat (16.115): 3 splitters, table directly under group 1",
           flat.count("tell splitter group 1") == 3 and "tell group 1\ntell table 1" in flat
@@ -119,6 +124,30 @@ def test_flat_layout_used_when_others_fail():
     server_mac.bridge = FakeBridge(handler=flat_only)
     res = json.loads(asyncio.run(server_mac.list_emails(folder="inbox", count=5)))
     check("list_emails returns the row", len(res) == 1, str(res))
+
+
+def test_unread_only_in_ui_fallback():
+    log("--- unread_only filters the window-read inbox ---")
+    raw = (row("Ann", "Old news") + RECORD_DELIM + row("Bob", "New thing", unread=True) + RECORD_DELIM
+           + row("Cy", "Older") + RECORD_DELIM)
+
+    def handler(script):
+        if "count of exchange accounts" in script:
+            return "0"  # New Outlook: no AppleScript-visible account
+        return raw if "System Events" in script else ""
+    fake = FakeBridge(handler=handler)
+    server_mac.bridge = fake
+    res = json.loads(asyncio.run(server_mac.list_emails(folder="inbox", count=5, unread_only=True)))
+    check("only the unread message returned", [r["sender_name"] for r in res] == ["Bob"], str(res))
+    check("its id keeps row number 2", res and res[0]["entry_id"].startswith("ui-2-"), str(res))
+    ui = [x for x in fake.scripts if "System Events" in x]
+    check("scans at least 50 rows for unread_only", ui and "if maxRows > 50 then" in ui[-1], ui[-1][:80] if ui else "")
+    res = json.loads(asyncio.run(server_mac.list_emails(folder="inbox", count=5)))
+    check("without unread_only all 3 returned", len(res) == 3, str(res))
+
+    raw = row("Ann", "Old news") + RECORD_DELIM
+    out = asyncio.run(server_mac.list_emails(folder="inbox", count=5, unread_only=True))
+    check("no unread mail -> plain [] (no New Outlook note: the window was read)", json.loads(out) == [], out[:120])
 
 
 def test_date_group_headers_skipped():
@@ -227,7 +256,7 @@ def test_empty_results_explain_new_outlook():
     calls = {
         "list_drafts": lambda: server_mac.list_drafts(),
         "list_emails (sent items)": lambda: server_mac.list_emails(folder="sent items", count=5),
-        "search_emails": lambda: server_mac.search_emails(query="x"),
+        "search_emails (sent items)": lambda: server_mac.search_emails(query="x", folder="sent items"),
         "list_events": lambda: server_mac.list_events(start_date="2026-11-16", end_date="2026-11-23"),
         "search_events": lambda: server_mac.search_events(query="x"),
         "list_tasks": lambda: server_mac.list_tasks(),
@@ -271,14 +300,14 @@ def test_fingerprint_ignores_read_state():
     fake = FakeBridge(output=row("A", "one") + RECORD_DELIM)
     asyncio.run(server_mac._ui_list_messages(fake, 5))
     check("rows script emits empty record on error",
-          'on error\n        set output to output & (character id 2)' in fake.scripts[0],
+          'on error\n            set output to output & (character id 2)' in fake.scripts[0],
           fake.scripts[0])
 
 
 def make_ui_handler(rows, pane, selected):
     """Fake System Events: list script returns rows, select records the row."""
     def handler(script):
-        if "set rowList to rows" in script:
+        if "set rowCount to count of rows" in script:
             return "".join(r + RECORD_DELIM for r in rows)
         m = re.search(r"select row (\d+)", script)
         if m:
@@ -339,7 +368,7 @@ def test_read_email_ui_id():
 
     # select fails on both layouts -> clear JSON error
     def failing(script):
-        if "set rowList to rows" in script:
+        if "set rowCount to count of rows" in script:
             return "".join(r + RECORD_DELIM for r in rows)
         raise RuntimeError("no table")
     server_mac.bridge = FakeBridge(handler=failing)
@@ -432,6 +461,7 @@ def main():
     test_list_falls_back_to_new_layout()
     test_flat_layout_used_when_others_fail()
     test_date_group_headers_skipped()
+    test_unread_only_in_ui_fallback()
     test_list_emails_uses_ui_fallback()
     test_missing_accessibility_is_reported()
     test_empty_results_explain_new_outlook()

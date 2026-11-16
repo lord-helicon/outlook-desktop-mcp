@@ -24,6 +24,7 @@ from outlook_desktop_mcp.utils.applescript_helpers import (
     format_date,
     parse_date,
     is_builtin_folder,
+    FOLDER_MAP,
     resolve_folder_ref,
     text_to_html,
     AS_DELIM,
@@ -31,7 +32,7 @@ from outlook_desktop_mcp.utils.applescript_helpers import (
     DELIM,
     RECORD_DELIM,
 )
-from outlook_desktop_mcp.utils.output import compact_json_tools
+from outlook_desktop_mcp.utils.output import compact_json_tools, set_server_version
 from outlook_desktop_mcp.utils.attachments import (
     attachment_root,
     is_within,
@@ -97,6 +98,7 @@ mcp = FastMCP(
 
 # Every tool result leaves the server as compact JSON (see utils/output.py).
 compact_json_tools(mcp)
+set_server_version(mcp)
 
 bridge = AppleScriptBridge()
 
@@ -113,6 +115,62 @@ def _clean(value: str) -> str:
     """Replace AppleScript's 'missing value' with empty string."""
     v = value.strip()
     return "" if v == "missing value" else v
+
+
+_DATE_HINT = "Use YYYY-MM-DD or YYYY-MM-DD HH:MM (DD.MM.YYYY [HH:MM] is also accepted)."
+
+
+def _parse_when(value: str, field: str):
+    """Parse a caller-supplied date/time. Returns (datetime, None) or (None, error).
+
+    Accepts ISO 8601 ("2026-12-01", "2026-12-01 14:00", "2026-12-01T14:00:00")
+    and the unambiguous dotted day-first form ("01.12.2026", "01.12.2026 14:00").
+    Slash forms are rejected: 01/12/2026 means different days in different locales.
+    """
+    text = (value or "").strip()
+    try:
+        return datetime.fromisoformat(text), None
+    except ValueError:
+        pass
+    for fmt in ("%d.%m.%Y %H:%M", "%d.%m.%Y %H:%M:%S", "%d.%m.%Y"):
+        try:
+            return datetime.strptime(text, fmt), None
+        except ValueError:
+            continue
+    return None, f"Error: {field} '{value}' is not a valid date. {_DATE_HINT}"
+
+
+def _bad_count(name: str, value, minimum: int = 1) -> str | None:
+    """Error text if a count/limit argument is not an int >= minimum."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        return f"Error: {name} must be a whole number of at least {minimum} (got {value!r})."
+    return None
+
+
+def _priority_name(value: str) -> str:
+    """'priority high' (AppleScript enum text) -> 'high'."""
+    v = _clean(value)
+    return v[len("priority "):] if v.startswith("priority ") else v
+
+
+async def _no_mail_account_error(action: str) -> str | None:
+    """Refuse mail-writing tools when Outlook has no AppleScript-visible account.
+
+    New Outlook accepts `make new outgoing message` and returns an id, but the
+    message is never stored or sent. Without this check save_draft reported
+    success for drafts that do not exist (found in a live test on 16.115).
+    """
+    try:
+        if (await bridge.run(_ACCOUNT_COUNT_SCRIPT)).strip() == "0":
+            return (
+                f"Error: cannot {action}. Outlook has no mail account that AppleScript "
+                "can see (New Outlook keeps Microsoft 365 mail in the cloud). New Outlook "
+                "accepts the request but never saves or sends the message. Switch Outlook "
+                "to Legacy Outlook to use this tool."
+            )
+    except Exception:
+        pass  # can't tell: let the tool run as before
+    return None
 
 
 async def _run_with_fallback(fast_script: str, legacy_script: str) -> str:
@@ -144,7 +202,7 @@ async def _run_with_fallback(fast_script: str, legacy_script: str) -> str:
 # the message list table visible in the Outlook window.
 
 
-# Element chains from `window 1` down to the message table. The layout
+# Element chains from the main window down to the message table. The layout
 # differs between Outlook builds: New Outlook has four nested splitter groups
 # and an extra `UI element` wrapper; older builds have three and no wrapper;
 # 16.115 has three and no scroll area around the table.
@@ -210,8 +268,155 @@ def _is_ui_access_denied(error: BaseException) -> bool:
     return "-25211" in text or "assistive access" in text
 
 
+# Sidebar names of the standard folders in New Outlook, per language (the
+# label is "<name>; N unread messages"). Keys follow FOLDER_MAP's targets.
+_UI_FOLDER_ALIASES = {
+    # Ordered: the first name found in the sidebar wins, so the standard
+    # folder beats a custom folder with a generic name (e.g. "Junk").
+    "inbox": ("inbox", "posteingang", "innboks", "inkorg", "indbakke",
+              "boîte de réception", "bandeja de entrada", "posta in arrivo",
+              "caixa de entrada", "postvak in", "skrzynka odbiorcza",
+              "受信トレイ", "收件箱", "收件匣", "받은 편지함"),
+    "sent items": ("sent items", "sent", "sent mail", "gesendete elemente", "gesendet",
+                   "éléments envoyés", "elementos enviados", "posta inviata",
+                   "sendte elementer", "sendt", "skickat", "verzonden items"),
+    "drafts": ("drafts", "entwürfe", "brouillons", "borradores", "bozze",
+               "kladder", "utkast", "concepten"),
+    "deleted items": ("deleted items", "gelöschte elemente", "éléments supprimés",
+                      "elementos eliminados", "posta eliminata", "slettede elementer",
+                      "borttagna objekt", "verwijderde items", "trash", "deleted"),
+    "junk mail": ("junk email", "junk e-mail", "junk-e-mail", "courrier indésirable",
+                  "correo no deseado", "posta indesiderata", "søppelpost", "skräppost",
+                  "ongewenste e-mail", "junk mail", "junk", "spam"),
+    "outbox": ("outbox", "postausgang", "boîte d'envoi", "bandeja de salida",
+               "posta in uscita", "utboks", "utkorgen", "postvak uit"),
+    "archive": ("archive", "archiv", "archives", "archivo", "archivio", "arkiv", "archief"),
+}
+_UI_INBOX_NAMES = set(_UI_FOLDER_ALIASES["inbox"])
+# Outlook's front window is not always the main window: a reminder, an open
+# message or a notification can be in front. Every window script first finds
+# the main window (the one with splitter groups) and refers to it by index.
+_UI_MAIN_WINDOW_PREAMBLE = (
+    'set mainWinIdx to 1\n'
+    'tell application "System Events" to tell process "Microsoft Outlook"\n'
+    '    repeat with i from 1 to (count of windows)\n'
+    '        if (count of splitter groups of window i) > 0 then\n'
+    '            set mainWinIdx to i\n'
+    '            exit repeat\n'
+    '        end if\n'
+    '    end repeat\n'
+    'end tell\n'
+)
+_UI_SIDEBAR = "outline 1 of scroll area 1 of splitter group 1 of window mainWinIdx"
+# Seconds for the message list to load after selecting a folder.
+_UI_FOLDER_SETTLE_SECONDS = 1.2
+
+
+class UIWrongFolderError(RuntimeError):
+    """The requested folder can't be shown in the Outlook window."""
+
+
+class UIUnavailableError(RuntimeError):
+    """The Outlook window can't be used for this request (unknown layout)."""
+
+
+def _ui_folder_names(folder: str) -> list[str]:
+    """Sidebar names that count as `folder` (lower-case), best match first."""
+    key = (folder or "inbox").strip().lower()
+    key = FOLDER_MAP.get(key, key)
+    names = list(_UI_FOLDER_ALIASES.get(key, ()))
+    return names if key in names else names + [key]
+
+
+def _ui_label_name(label: str) -> str:
+    """'Inbox; 1 unread messages' -> 'Inbox'."""
+    return re.split(r"[;,]", label or "", maxsplit=1)[0].strip()
+
+
+async def _ui_sidebar(bridge_obj) -> list[tuple[int, str, bool]] | None:
+    """(row number, folder name, selected) for each sidebar row; None if unreadable."""
+    script = _UI_MAIN_WINDOW_PREAMBLE + (
+        'tell application "System Events" to tell process "Microsoft Outlook"\n'
+        f'    set o to {_UI_SIDEBAR}\n'
+        '    set out to ""\n'
+        '    repeat with i from 1 to (count of rows of o)\n'
+        '        set r to row i of o\n'
+        '        set d to ""\n'
+        '        try\n'
+        '            set d to description of UI element 1 of r\n'
+        '        end try\n'
+        f'        set out to out & i & {AS_DELIM} & my sf(d) & {AS_DELIM} & (selected of r) & {AS_RECORD_DELIM}\n'
+        '    end repeat\n'
+        '    return out\n'
+        'end tell'
+    )
+    try:
+        raw = await bridge_obj.run(script)
+    except Exception as e:
+        if _is_ui_access_denied(e):
+            raise
+        return None  # other layout: can't tell
+    rows = []
+    for rec in raw.split(RECORD_DELIM):
+        parts = rec.split(DELIM)
+        if len(parts) == 3 and parts[0].strip().isdigit():
+            rows.append((int(parts[0]), _ui_label_name(parts[1]), parts[2].strip() == "true"))
+    return rows or None
+
+
+async def _ui_select_sidebar_row(bridge_obj, row: int) -> None:
+    await bridge_obj.run(
+        _UI_MAIN_WINDOW_PREAMBLE
+        + 'tell application "System Events" to tell process "Microsoft Outlook"\n'
+        f'    select row {int(row)} of {_UI_SIDEBAR}\n'
+        'end tell'
+    )
+
+
+async def _ui_in_folder(bridge_obj, folder: str, action):
+    """Run `action()` while the Outlook window shows `folder`.
+
+    New Outlook can only be read through its window, which shows one folder at
+    a time. If another folder is selected, select `folder` in the sidebar, run
+    the action, then select the previous folder again. If the sidebar can't be
+    read (other layout), only the Inbox is attempted, as before.
+    """
+    names = _ui_folder_names(folder)
+    side = await _ui_sidebar(bridge_obj)
+    if side is None:
+        if _UI_INBOX_NAMES.intersection(names):
+            return await action()
+        raise UIUnavailableError(
+            f"Can't read Outlook's folder list, so the folder '{folder}' can't be opened."
+        )
+    current = next((r for r in side if r[2]), None)
+    by_name = {}
+    for r in side:
+        by_name.setdefault(r[1].lower(), r)  # first row per name (Favorites first)
+    target = next((by_name[n] for n in names if n in by_name), None)
+    if current and target and current[1].lower() == target[1].lower():
+        return await action()
+    if target is None:
+        raise UIWrongFolderError(
+            f"Outlook's folder list has no folder '{folder}'. If it is a subfolder, "
+            "expand its parent folder in Outlook first."
+        )
+    await _ui_select_sidebar_row(bridge_obj, target[0])
+    await asyncio.sleep(_UI_FOLDER_SETTLE_SECONDS)
+    try:
+        return await action()
+    finally:
+        if current:
+            try:
+                await _ui_select_sidebar_row(bridge_obj, current[0])
+            except Exception:
+                pass  # best effort: leave the folder that was read selected
+
+
 # Extra rows read per list: date group headers ("Today", ...) are rows too.
 _UI_HEADER_ALLOWANCE = 5
+# Rows scanned for unread_only in the UI fallback.
+_UI_UNREAD_SCAN_ROWS = 50
 
 
 def _ui_scope(layout: dict, inner: str, *, pane: bool = False) -> str:
@@ -222,7 +427,7 @@ def _ui_scope(layout: dict, inner: str, *, pane: bool = False) -> str:
     whose children are the list (group 1), header (group 2) and body (group 3).
     """
     chain = ["application \"System Events\"", "process \"Microsoft Outlook\"",
-             "window 1"]
+             "window mainWinIdx"]
     chain += ["splitter group 1"] * layout["splitters"]
     if not pane:
         chain += ["group 1", *layout["wrappers"]]
@@ -230,32 +435,52 @@ def _ui_scope(layout: dict, inner: str, *, pane: bool = False) -> str:
             chain.append("scroll area 1")
         chain.append("table 1")
     lines = [f"tell {c}" for c in chain] + [inner] + ["end tell"] * len(chain)
-    return "\n".join(lines)
+    return _UI_MAIN_WINDOW_PREAMBLE + "\n".join(lines)
 
 
-async def _ui_list_messages(bridge_obj, count: int = 10) -> list[dict]:
-    """Read visible inbox messages via UI scripting (System Events).
+async def _ui_list_messages(bridge_obj, count: int = 10, unread_only: bool = False) -> list[dict]:
+    """Read the message list shown in the Outlook window (System Events).
 
-    This is the fallback for New Outlook for Mac where AppleScript's inbox
-    keyword only sees the empty local mailbox.
+    The fallback for New Outlook for Mac, whose mailbox AppleScript can't see.
+    Reads whatever folder the window shows; use _ui_in_folder to pick one.
     """
     # Read a few extra rows: date group headers take up rows too.
     max_rows = count + _UI_HEADER_ALLOWANCE
+    if unread_only:
+        # Unread messages can be anywhere in the list; scan a fixed window
+        # (batched, ~0.06 s per row).
+        max_rows = max(max_rows, _UI_UNREAD_SCAN_ROWS)
+    # One Apple event for all rows (~0.06 s/row) instead of one per row
+    # (~0.4 s/row). If the batch fails or its length differs from the row
+    # count (a row without a cell), fall back to the per-row loop so row
+    # numbers stay exact.
     rows_script = (
-        'set rowList to rows\n'
-        'set rowCount to count of rowList\n'
+        'set rowCount to count of rows\n'
         'set maxRows to rowCount\n'
         f'if maxRows > {max_rows} then set maxRows to {max_rows}\n'
+        'if maxRows < 1 then return ""\n'
         'set output to ""\n'
-        'repeat with i from 1 to maxRows\n'
-        '    set r to row i\n'
-        '    try\n'
-        '        set cellDesc to description of UI element 1 of r\n'
-        f'        set output to output & my sf(cellDesc) & {AS_RECORD_DELIM}\n'
-        '    on error\n'
-        f'        set output to output & {AS_RECORD_DELIM}\n'
-        '    end try\n'
-        'end repeat\n'
+        'set batched to false\n'
+        'try\n'
+        '    set descList to description of UI element 1 of rows 1 thru maxRows\n'
+        '    if (count of descList) = maxRows then\n'
+        '        repeat with d in descList\n'
+        f'            set output to output & my sf(contents of d) & {AS_RECORD_DELIM}\n'
+        '        end repeat\n'
+        '        set batched to true\n'
+        '    end if\n'
+        'end try\n'
+        'if not batched then\n'
+        '    set output to ""\n'
+        '    repeat with i from 1 to maxRows\n'
+        '        try\n'
+        '            set cellDesc to description of UI element 1 of row i\n'
+        f'            set output to output & my sf(cellDesc) & {AS_RECORD_DELIM}\n'
+        '        on error\n'
+        f'            set output to output & {AS_RECORD_DELIM}\n'
+        '        end try\n'
+        '    end repeat\n'
+        'end if\n'
         'return output'
     )
 
@@ -298,7 +523,7 @@ async def _ui_list_messages(bridge_obj, count: int = 10) -> list[dict]:
         # languages so the parser works regardless of macOS language.
         _UNREAD_TOKENS = {"Ulest", "Unread", "Non lu", "Nicht gelesen",
                           "No leído", "未読", "未读"}
-        _ATTACHMENT_TOKENS = {"Har filer", "Has attachments", "Contient des fichiers",
+        _ATTACHMENT_TOKENS = {"Har filer", "Has files", "Has attachments", "Contient des fichiers",
                               "Hat Anlagen", "Tiene archivos adjuntos", "添付ファイルあり",
                               "有附件"}
         _SKIP_PREFIXES = ("Merket som", "Marked as", "Marqué comme",
@@ -353,6 +578,8 @@ async def _ui_list_messages(bridge_obj, count: int = 10) -> list[dict]:
             "_source": "ui_scraping",
         })
 
+    if unread_only:
+        results = [r for r in results if r["unread"]]
     return results[:count]
 
 
@@ -389,6 +616,72 @@ async def _ui_resolve_row(bridge_obj, row_number: int, fingerprint: str) -> int 
     if not matches:
         return None
     return min(matches, key=lambda n: abs(n - row_number))
+
+async def _no_visible_accounts() -> bool:
+    """True if Outlook reports no Exchange/IMAP/POP account (New Outlook)."""
+    try:
+        return (await bridge.run(_ACCOUNT_COUNT_SCRIPT)).strip() == "0"
+    except Exception:
+        return False
+
+
+def _ui_matching(rows: list[dict], query: str) -> list[dict]:
+    q = (query or "").strip().lower()
+    return [r for r in rows if q in r["subject"].lower() or q in r["sender_name"].lower()]
+
+
+async def _ui_mail_result(verb: str, folder: str, rows_fn) -> str | None:
+    """Run rows_fn while the window shows `folder`; JSON rows or an error text.
+
+    None means the window can't be used (unknown layout): the caller falls
+    back to its AppleScript result.
+    """
+    try:
+        rows = await _ui_in_folder(bridge, folder, rows_fn)
+    except UIWrongFolderError as e:
+        return f"Error {verb}: {e}"
+    except Exception as e:
+        if _is_ui_access_denied(e):
+            return f"Error {verb}: {UI_ACCESS_DENIED_MESSAGE}"
+        return None
+    return json.dumps(rows, indent=2, default=str)
+
+
+async def _ui_search_result(folder: str, query: str, count: int) -> str | None:
+    async def rows_fn():
+        return _ui_matching(await _ui_list_messages(bridge, _UI_LOOKUP_ROWS), query)[:count]
+    return await _ui_mail_result("searching emails", folder, rows_fn)
+
+
+async def _inbox_search_result(results: list, folder: str, query: str, count: int) -> str:
+    """search_emails result; for an empty AppleScript inbox, search the window."""
+    if results or (folder or "").lower().strip() != "inbox":
+        return await _results_json(results, "matching emails")
+    out = await _ui_search_result("inbox", query, count)
+    return out if out is not None else await _results_json(results, "matching emails")
+
+
+async def _ui_read_by_subject(folder: str, subject_search: str) -> str | None:
+    """read_email(subject_search) through the window; None if it can't be used."""
+    async def action():
+        hits = _ui_matching(await _ui_list_messages(bridge, _UI_LOOKUP_ROWS), subject_search)
+        if not hits:
+            return {"error": f"No email found matching '{subject_search}'"}
+        m = _UI_ID_RE.fullmatch(hits[0]["entry_id"])
+        result = await _ui_read_email_by_row(bridge, int(m.group(1)))
+        if "error" not in result:
+            result["entry_id"] = hits[0]["entry_id"]
+        return result
+    try:
+        result = await _ui_in_folder(bridge, folder, action)
+    except UIWrongFolderError as e:
+        return json.dumps({"error": str(e)})
+    except Exception as e:
+        if _is_ui_access_denied(e):
+            return json.dumps({"error": UI_ACCESS_DENIED_MESSAGE})
+        return None
+    return json.dumps(result, indent=2, default=str)
+
 
 _UI_READ_PANE_SCRIPT = """set emailSubject to ""
 try
@@ -523,6 +816,8 @@ async def send_email(
     Returns:
         A confirmation message with subject and recipients, or an error.
     """
+    if err := await _no_mail_account_error("send email"):
+        return err
     # Build recipient lines
     def _recipient_lines(addresses: str, kind: str) -> str:
         lines = ""
@@ -587,6 +882,8 @@ async def save_draft(
     Returns:
         A confirmation message with subject and recipients, or an error.
     """
+    if err := await _no_mail_account_error("save a draft"):
+        return err
     # Build recipient lines (same dialect as send_email)
     def _recipient_lines(addresses: str, kind: str) -> str:
         lines = ""
@@ -608,7 +905,7 @@ async def save_draft(
     script = f'''tell application "Microsoft Outlook"
     set newMsg to make new outgoing message with properties {{subject:"{escape(subject)}", {content_prop}}}
     {to_lines}{cc_lines}{bcc_lines}
-    return id of newMsg
+    return my sf(id of newMsg)
 end tell'''
 
     try:
@@ -652,6 +949,10 @@ async def list_drafts(
     Returns:
         JSON array of draft summary objects.
     """
+    if err := _bad_count("limit", limit):
+        return err
+    if err := _bad_count("offset", offset, 0):
+        return err
     limit = min(max(1, limit), 200)
     offset = max(0, offset)
     end_index = offset + limit  # 1-indexed slice upper bound applied below
@@ -692,7 +993,7 @@ async def list_drafts(
         end try
         set mtime to ""
         try
-            set mtime to (modification date of m) as string
+            set mtime to (modification date of m)
         end try
         set mattcount to 0
         try
@@ -702,7 +1003,7 @@ async def list_drafts(
         try
             set mbody to plain text content of m
         end try
-        set output to output & my sf((mid as text)) & {AS_DELIM} & my sf(msubject) & {AS_DELIM} & my sf(mto) & {AS_DELIM} & my sf(mcc) & {AS_DELIM} & my sf(mbcc) & {AS_DELIM} & my sf(mtime) & {AS_DELIM} & my sf((mattcount as text)) & {AS_DELIM} & my sf(mbody) & {AS_RECORD_DELIM}
+        set output to output & my sf(mid) & {AS_DELIM} & my sf(msubject) & {AS_DELIM} & my sf(mto) & {AS_DELIM} & my sf(mcc) & {AS_DELIM} & my sf(mbcc) & {AS_DELIM} & my sf(mtime) & {AS_DELIM} & my sf(mattcount) & {AS_DELIM} & my sf(mbody) & {AS_RECORD_DELIM}
     end repeat
     return output
 end tell'''
@@ -787,7 +1088,7 @@ async def read_draft(draft_id: str) -> str:
     end try
     set mtime to ""
     try
-        set mtime to (modification date of m) as string
+        set mtime to (modification date of m)
     end try
     set mattnames to ""
     try
@@ -803,7 +1104,7 @@ async def read_draft(draft_id: str) -> str:
     try
         set mhtml to content of m
     end try
-    return my sf((mid as text)) & {AS_DELIM} & my sf(msubject) & {AS_DELIM} & my sf(mto) & {AS_DELIM} & my sf(mcc) & {AS_DELIM} & my sf(mbcc) & {AS_DELIM} & my sf(mtime) & {AS_DELIM} & my sf(mattnames) & {AS_DELIM} & my sf(mbody) & {AS_DELIM} & my sf(mhtml)
+    return my sf(mid) & {AS_DELIM} & my sf(msubject) & {AS_DELIM} & my sf(mto) & {AS_DELIM} & my sf(mcc) & {AS_DELIM} & my sf(mbcc) & {AS_DELIM} & my sf(mtime) & {AS_DELIM} & my sf(mattnames) & {AS_DELIM} & my sf(mbody) & {AS_DELIM} & my sf(mhtml)
 end tell'''
 
     try:
@@ -851,6 +1152,8 @@ async def send_draft(draft_id: str) -> str:
         JSON object confirming the send, or an error.
     """
     if err := _bad_message_id(draft_id):
+        return err
+    if err := await _no_mail_account_error("send a draft"):
         return err
     draft_id = draft_id.strip()
     script = f'''tell application "Microsoft Outlook"
@@ -907,12 +1210,26 @@ async def list_emails(
         folder: The folder to list. Case-insensitive names: "inbox" (default),
             "sent"/"sentmail", "drafts", "deleted"/"trash", "junk"/"spam",
             "outbox", or any custom folder name visible in list_folders output.
+            In New Outlook the folder is read from the Outlook window: if
+            another folder is shown, it is selected in the sidebar for the
+            read and the previous folder is selected again afterwards.
         count: Maximum number of emails to return. Default 10, max recommended 50.
         unread_only: If true, only return unread emails. Default false.
+            In New Outlook (inbox read from the window) only the first 50
+            rows are scanned.
 
     Returns:
         JSON array of email summary objects.
     """
+    if err := _bad_count("count", count):
+        return err
+    # New Outlook: AppleScript sees no account, so read the folder through the
+    # window (selecting it in the sidebar if needed, then switching back).
+    if await _no_visible_accounts():
+        out = await _ui_mail_result(
+            "listing emails", folder, lambda: _ui_list_messages(bridge, count, unread_only))
+        if out is not None:
+            return out
     folder_ref = resolve_folder_ref(folder)
     unread_filter = ' whose is read is false' if unread_only else ''
 
@@ -958,7 +1275,7 @@ async def list_emails(
         end try
         set mtime to ""
         try
-            set mtime to (item i of timeList) as string
+            set mtime to (item i of timeList)
         end try
         set misread to false
         try
@@ -968,7 +1285,7 @@ async def list_emails(
         try
             set mattcount to count of (item i of attLists)
         end try
-        set output to output & my sf(((item i of idList) as text)) & {AS_DELIM} & my sf(msubject) & {AS_DELIM} & my sf(msender) & {AS_DELIM} & my sf(msenderName) & {AS_DELIM} & my sf(mtime) & {AS_DELIM} & my sf((misread as text)) & {AS_DELIM} & my sf((mattcount as text)) & {AS_RECORD_DELIM}
+        set output to output & my sf(item i of idList) & {AS_DELIM} & my sf(msubject) & {AS_DELIM} & my sf(msender) & {AS_DELIM} & my sf(msenderName) & {AS_DELIM} & my sf(mtime) & {AS_DELIM} & my sf(misread) & {AS_DELIM} & my sf(mattcount) & {AS_RECORD_DELIM}
     end repeat
     return output
 end tell'''
@@ -992,13 +1309,13 @@ end tell'''
         try
             set msenderName to name of sender of m
         end try
-        set mtime to time received of m as string
+        set mtime to time received of m
         set misread to is read of m
         set mattcount to 0
         try
             set mattcount to count of attachments of m
         end try
-        set output to output & my sf((mid as text)) & {AS_DELIM} & my sf(msubject) & {AS_DELIM} & my sf(msender) & {AS_DELIM} & my sf(msenderName) & {AS_DELIM} & my sf(mtime) & {AS_DELIM} & my sf((misread as text)) & {AS_DELIM} & my sf((mattcount as text)) & {AS_RECORD_DELIM}
+        set output to output & my sf(mid) & {AS_DELIM} & my sf(msubject) & {AS_DELIM} & my sf(msender) & {AS_DELIM} & my sf(msenderName) & {AS_DELIM} & my sf(mtime) & {AS_DELIM} & my sf(misread) & {AS_DELIM} & my sf(mattcount) & {AS_RECORD_DELIM}
     end repeat
     return output
 end tell'''
@@ -1030,14 +1347,13 @@ end tell'''
         # Fallback: New Outlook for Mac keeps Exchange messages outside the
         # AppleScript-visible mailbox. If the standard query returned nothing
         # for the inbox, try reading the visible message list via UI scripting.
+        # The window was read, so an empty list is a real answer (e.g. no
+        # unread mail). Unknown layouts fall through to the AppleScript result.
         if not results and folder.lower().strip() == "inbox":
-            try:
-                results = await _ui_list_messages(bridge, count)
-            except Exception as e:
-                if _is_ui_access_denied(e):
-                    return f"Error listing emails: {UI_ACCESS_DENIED_MESSAGE}"
-                # Other UI scraping failures (no window, unknown layout):
-                # keep returning the empty AppleScript result.
+            out = await _ui_mail_result(
+                "listing emails", "inbox", lambda: _ui_list_messages(bridge, count, unread_only))
+            if out is not None:
+                return out
 
         return await _results_json(results, "emails")
     except Exception as e:
@@ -1065,8 +1381,9 @@ async def read_email(
             a specific email. Get this from list_emails or search_emails results.
         subject_search: Alternative to entry_id. A case-insensitive substring
             to search for in email subjects. Returns the most recent match.
-        folder: Folder to search when using subject_search. Ignored when
-            entry_id is provided. Default "inbox".
+        folder: Folder to search when using subject_search, and, for ui-N ids
+            from New Outlook, the folder the id was listed from. Default "inbox".
+            Ignored for numeric entry_ids.
 
     Returns:
         JSON object with full email details (entry_id, subject, sender,
@@ -1085,20 +1402,24 @@ async def read_email(
                     f"'{entry_id}' has no row fingerprint, so it could open the "
                     "wrong message. Call list_emails again and use the new id."
                 )})
-            try:
+            async def read_row():
                 current = await _ui_resolve_row(bridge, row_number, fingerprint)
                 if current is None:
-                    result = {"error": (
+                    return {"error": (
                         f"The message for '{entry_id}' is no longer in the first "
-                        f"{max(row_number, _UI_LOOKUP_ROWS)} rows of the message "
-                        "list. Call list_emails again."
+                        f"{max(row_number, _UI_LOOKUP_ROWS)} rows of the '{folder}' "
+                        "message list. Call list_emails again (with the same folder)."
                     )}
-                else:
-                    result = await _ui_read_email_by_row(bridge, current)
-                    if "error" not in result:
-                        result["entry_id"] = f"ui-{current}-{fingerprint}"
+                res = await _ui_read_email_by_row(bridge, current)
+                if "error" not in res:
+                    res["entry_id"] = f"ui-{current}-{fingerprint}"
+                return res
+            try:
+                # ui ids are rows of the folder they were listed from.
+                result = await _ui_in_folder(bridge, folder, read_row)
             except Exception as e:
                 result = {"error": UI_ACCESS_DENIED_MESSAGE if _is_ui_access_denied(e)
+                          else str(e) if isinstance(e, UIWrongFolderError)
                           else f"Failed to read UI email: {e}"}
             if "error" in result:
                 return json.dumps(result)
@@ -1118,7 +1439,7 @@ async def read_email(
     try
         set msenderName to name of sender of m
     end try
-    set mtime to time received of m as string
+    set mtime to time received of m
     set misread to is read of m
     set mattcount to 0
     try
@@ -1142,9 +1463,13 @@ async def read_email(
     try
         set mbody to plain text content of m
     end try
-    return my sf((mid as text)) & {AS_DELIM} & my sf(msubject) & {AS_DELIM} & my sf(msender) & {AS_DELIM} & my sf(msenderName) & {AS_DELIM} & my sf(mtime) & {AS_DELIM} & my sf((misread as text)) & {AS_DELIM} & my sf((mattcount as text)) & {AS_DELIM} & my sf(mto) & {AS_DELIM} & my sf(mcc) & {AS_DELIM} & my sf(mbody)
+    return my sf(mid) & {AS_DELIM} & my sf(msubject) & {AS_DELIM} & my sf(msender) & {AS_DELIM} & my sf(msenderName) & {AS_DELIM} & my sf(mtime) & {AS_DELIM} & my sf(misread) & {AS_DELIM} & my sf(mattcount) & {AS_DELIM} & my sf(mto) & {AS_DELIM} & my sf(mcc) & {AS_DELIM} & my sf(mbody)
 end tell'''
     elif subject_search:
+        if await _no_visible_accounts():
+            out = await _ui_read_by_subject(folder, subject_search)
+            if out is not None:
+                return out
         folder_ref = resolve_folder_ref(folder)
         safe_query = escape(subject_search)
         script = f'''tell application "Microsoft Outlook"
@@ -1162,7 +1487,7 @@ end tell'''
     try
         set msenderName to name of sender of m
     end try
-    set mtime to time received of m as string
+    set mtime to time received of m
     set misread to is read of m
     set mattcount to 0
     try
@@ -1186,7 +1511,7 @@ end tell'''
     try
         set mbody to plain text content of m
     end try
-    return my sf((mid as text)) & {AS_DELIM} & my sf(msubject) & {AS_DELIM} & my sf(msender) & {AS_DELIM} & my sf(msenderName) & {AS_DELIM} & my sf(mtime) & {AS_DELIM} & my sf((misread as text)) & {AS_DELIM} & my sf((mattcount as text)) & {AS_DELIM} & my sf(mto) & {AS_DELIM} & my sf(mcc) & {AS_DELIM} & my sf(mbody)
+    return my sf(mid) & {AS_DELIM} & my sf(msubject) & {AS_DELIM} & my sf(msender) & {AS_DELIM} & my sf(msenderName) & {AS_DELIM} & my sf(mtime) & {AS_DELIM} & my sf(misread) & {AS_DELIM} & my sf(mattcount) & {AS_DELIM} & my sf(mto) & {AS_DELIM} & my sf(mcc) & {AS_DELIM} & my sf(mbody)
 end tell'''
     else:
         return json.dumps({"error": "Provide either entry_id or subject_search"})
@@ -1194,6 +1519,11 @@ end tell'''
     try:
         raw = await bridge.run(script)
         if raw == "NOT_FOUND":
+            # Empty AppleScript inbox: look in the window.
+            if subject_search and (folder or "").lower().strip() == "inbox":
+                out = await _ui_read_by_subject("inbox", subject_search)
+                if out is not None:
+                    return out
             return json.dumps({"error": f"No email found matching '{subject_search}'"})
 
         parts = raw.split(DELIM, 9)  # max 10 parts
@@ -1365,6 +1695,8 @@ async def reply_email(
     reply_cmd = "reply all to" if reply_all else "reply to"
     if err := _bad_message_id(entry_id):
         return err
+    if err := await _no_mail_account_error("reply to email"):
+        return err
     entry_id = entry_id.strip()
     script = f'''tell application "Microsoft Outlook"
     set m to message id {entry_id}
@@ -1413,7 +1745,7 @@ def _folder_listing_pass(level: int, max_depth: int) -> str:
                         set uu{level} to item i{level} of unread{level}
                         if uu{level} is not missing value then set u{level} to uu{level}
                     end try
-                    set output to output & my sf(acctName) & {AS_DELIM} & my sf(path{level}) & {AS_DELIM} & my sf((c{level} as text)) & {AS_DELIM} & my sf((u{level} as text)) & {AS_RECORD_DELIM}{deeper}
+                    set output to output & my sf(acctName) & {AS_DELIM} & my sf(path{level}) & {AS_DELIM} & my sf(c{level}) & {AS_DELIM} & my sf(u{level}) & {AS_RECORD_DELIM}{deeper}
                 end if
             end repeat
         end try'''
@@ -1448,6 +1780,8 @@ async def create_draft_reply(
     """
     if err := _bad_message_id(entry_id):
         return err
+    if err := await _no_mail_account_error("create a draft reply"):
+        return err
     if not body and not html_body:
         return "Error: Provide body or html_body."
     entry_id = entry_id.strip()
@@ -1471,7 +1805,7 @@ async def create_draft_reply(
     {content_line}
     save replyMsg
     set mid to id of replyMsg
-    return my sf((mid as text)) & {AS_DELIM} & my sf(originalSubject) & {AS_DELIM} & my sf(subject of replyMsg)
+    return my sf(mid) & {AS_DELIM} & my sf(originalSubject) & {AS_DELIM} & my sf(subject of replyMsg)
 end tell'''
 
     try:
@@ -1513,6 +1847,8 @@ async def list_folders(max_depth: int = 2) -> str:
         JSON array of folder objects with account, name, item_count,
         and unread_count.
     """
+    if err := _bad_count("max_depth", max_depth, 0):
+        return err
     depth = max(1, min(int(max_depth), 5))
     listing_pass = _folder_listing_pass(1, depth)
 
@@ -1560,7 +1896,7 @@ end tell'''
         set fname to name of f
         set fcount to count of messages of f
         set funread to unread count of f
-        set output to output & my sf(fname) & {AS_DELIM} & my sf((fcount as text)) & {AS_DELIM} & my sf((funread as text)) & {AS_RECORD_DELIM}
+        set output to output & my sf(fname) & {AS_DELIM} & my sf(fcount) & {AS_DELIM} & my sf(funread) & {AS_RECORD_DELIM}
     end repeat
     return output
 end tell'''
@@ -1622,6 +1958,12 @@ async def search_emails(
     Returns:
         JSON array of matching email summaries, or an error.
     """
+    if err := _bad_count("count", count):
+        return err
+    if await _no_visible_accounts():
+        out = await _ui_search_result(folder, query, count)
+        if out is not None:
+            return out
     folder_ref = resolve_folder_ref(folder)
     safe_query = escape(query)
 
@@ -1661,7 +2003,7 @@ async def search_emails(
         end try
         set mtime to ""
         try
-            set mtime to (item i of timeList) as string
+            set mtime to (item i of timeList)
         end try
         set misread to false
         try
@@ -1671,7 +2013,7 @@ async def search_emails(
         try
             set mattcount to count of (item i of attLists)
         end try
-        set output to output & my sf(((item i of idList) as text)) & {AS_DELIM} & my sf(msubject) & {AS_DELIM} & my sf(msender) & {AS_DELIM} & my sf(msenderName) & {AS_DELIM} & my sf(mtime) & {AS_DELIM} & my sf((misread as text)) & {AS_DELIM} & my sf((mattcount as text)) & {AS_RECORD_DELIM}
+        set output to output & my sf(item i of idList) & {AS_DELIM} & my sf(msubject) & {AS_DELIM} & my sf(msender) & {AS_DELIM} & my sf(msenderName) & {AS_DELIM} & my sf(mtime) & {AS_DELIM} & my sf(misread) & {AS_DELIM} & my sf(mattcount) & {AS_RECORD_DELIM}
     end repeat
     return output
 end tell'''
@@ -1695,13 +2037,13 @@ end tell'''
         try
             set msenderName to name of sender of m
         end try
-        set mtime to time received of m as string
+        set mtime to time received of m
         set misread to is read of m
         set mattcount to 0
         try
             set mattcount to count of attachments of m
         end try
-        set output to output & my sf((mid as text)) & {AS_DELIM} & my sf(msubject) & {AS_DELIM} & my sf(msender) & {AS_DELIM} & my sf(msenderName) & {AS_DELIM} & my sf(mtime) & {AS_DELIM} & my sf((misread as text)) & {AS_DELIM} & my sf((mattcount as text)) & {AS_RECORD_DELIM}
+        set output to output & my sf(mid) & {AS_DELIM} & my sf(msubject) & {AS_DELIM} & my sf(msender) & {AS_DELIM} & my sf(msenderName) & {AS_DELIM} & my sf(mtime) & {AS_DELIM} & my sf(misread) & {AS_DELIM} & my sf(mattcount) & {AS_RECORD_DELIM}
     end repeat
     return output
 end tell'''
@@ -1709,7 +2051,7 @@ end tell'''
     try:
         raw = await _run_with_fallback(fast_script, legacy_script)
         if not raw:
-            return await _results_json([], "matching emails")
+            return await _inbox_search_result([], folder, query, count)
 
         results = []
         for record in raw.split(RECORD_DELIM):
@@ -1730,7 +2072,7 @@ end tell'''
                 "has_attachments": att_count > 0,
                 "attachment_count": att_count,
             })
-        return await _results_json(results, "matching emails")
+        return await _inbox_search_result(results, folder, query, count)
     except Exception as e:
         return f"Error searching emails: {e}"
 
@@ -1767,8 +2109,16 @@ async def list_events(
     Returns:
         JSON array of event summary objects.
     """
-    start = datetime.fromisoformat(start_date) if start_date else datetime.now()
-    end = datetime.fromisoformat(end_date) if end_date else start + timedelta(days=7)
+    if err := _bad_count("count", count):
+        return err
+    start, err = _parse_when(start_date, "start_date") if start_date else (datetime.now(), None)
+    if err:
+        return err
+    end, err = _parse_when(end_date, "end_date") if end_date else (start + timedelta(days=7), None)
+    if err:
+        return err
+    if end < start:
+        return "Error: end_date is before start_date."
 
     # The date range is applied server-side with a whose filter on start
     # time; the cap only bounds the payload if the range matches thousands
@@ -1808,11 +2158,11 @@ repeat with i from 1 to maxFetch
     end try
     set estart to ""
     try
-        set estart to (item i of startList) as «class isot» as string
+        set estart to (item i of startList)
     end try
     set eend to ""
     try
-        set eend to (item i of endList) as «class isot» as string
+        set eend to (item i of endList)
     end try
     set elocation to ""
     try
@@ -1826,7 +2176,7 @@ repeat with i from 1 to maxFetch
     try
         set eallday to item i of alldayList
     end try
-    set output to output & my sf(((item i of idList) as text)) & {AS_DELIM} & my sf(esubject) & {AS_DELIM} & my sf(estart) & {AS_DELIM} & my sf(eend) & {AS_DELIM} & my sf(elocation) & {AS_DELIM} & my sf(eorganizer) & {AS_DELIM} & my sf((eallday as text)) & {AS_RECORD_DELIM}
+    set output to output & my sf(item i of idList) & {AS_DELIM} & my sf(esubject) & {AS_DELIM} & my sf(estart) & {AS_DELIM} & my sf(eend) & {AS_DELIM} & my sf(elocation) & {AS_DELIM} & my sf(eorganizer) & {AS_DELIM} & my sf(eallday) & {AS_RECORD_DELIM}
 end repeat
 return output'''
 
@@ -1860,11 +2210,11 @@ return output'''
         end try
         set estart to ""
         try
-            set estart to (item i of startList) as string
+            set estart to (item i of startList)
         end try
         set eend to ""
         try
-            set eend to (item i of endList) as string
+            set eend to (item i of endList)
         end try
         set elocation to ""
         try
@@ -1878,7 +2228,7 @@ return output'''
         try
             set eallday to item i of alldayList
         end try
-        set output to output & my sf(((item i of idList) as text)) & {AS_DELIM} & my sf(esubject) & {AS_DELIM} & my sf(estart) & {AS_DELIM} & my sf(eend) & {AS_DELIM} & my sf(elocation) & {AS_DELIM} & my sf(eorganizer) & {AS_DELIM} & my sf((eallday as text)) & {AS_RECORD_DELIM}
+        set output to output & my sf(item i of idList) & {AS_DELIM} & my sf(esubject) & {AS_DELIM} & my sf(estart) & {AS_DELIM} & my sf(eend) & {AS_DELIM} & my sf(elocation) & {AS_DELIM} & my sf(eorganizer) & {AS_DELIM} & my sf(eallday) & {AS_RECORD_DELIM}
     end repeat
     return output
 end tell'''
@@ -1954,8 +2304,8 @@ async def get_event(entry_id: str) -> str:
     set e to calendar event id {entry_id}
     set eid to id of e
     set esubject to subject of e
-    set estart to start time of e as string
-    set eend to end time of e as string
+    set estart to start time of e
+    set eend to end time of e
     set elocation to ""
     try
         set elocation to location of e
@@ -1976,7 +2326,7 @@ async def get_event(entry_id: str) -> str:
             set eattendees to eattendees & address of a & "; "
         end repeat
     end try
-    return my sf((eid as text)) & {AS_DELIM} & my sf(esubject) & {AS_DELIM} & my sf(estart) & {AS_DELIM} & my sf(eend) & {AS_DELIM} & my sf(elocation) & {AS_DELIM} & my sf(eorganizer) & {AS_DELIM} & my sf((eallday as text)) & {AS_DELIM} & my sf(ebody) & {AS_DELIM} & my sf(eattendees)
+    return my sf(eid) & {AS_DELIM} & my sf(esubject) & {AS_DELIM} & my sf(estart) & {AS_DELIM} & my sf(eend) & {AS_DELIM} & my sf(elocation) & {AS_DELIM} & my sf(eorganizer) & {AS_DELIM} & my sf(eallday) & {AS_DELIM} & my sf(ebody) & {AS_DELIM} & my sf(eattendees)
 end tell'''
 
     try:
@@ -2035,8 +2385,16 @@ async def create_event(
     Returns:
         Confirmation with event subject and entry_id, or an error.
     """
-    start_dt = datetime.fromisoformat(start)
-    end_dt = datetime.fromisoformat(end)
+    start_dt, err = _parse_when(start, "start")
+    if err:
+        return err
+    end_dt, err = _parse_when(end, "end")
+    if err:
+        return err
+    if end_dt < start_dt:
+        return "Error: end is before start."
+    if isinstance(reminder_minutes, bool) or not isinstance(reminder_minutes, int) or reminder_minutes < 0:
+        return f"Error: reminder_minutes must be 0 or more (got {reminder_minutes!r})."
 
     props = f'subject:"{escape(subject)}", start time:{format_date(start_dt)}, end time:{format_date(end_dt)}'
     if location:
@@ -2048,7 +2406,7 @@ async def create_event(
 
     script = f'''tell application "Microsoft Outlook"
     set newEvt to make new calendar event with properties {{{props}}}
-    return my sf((id of newEvt as text)) & {AS_DELIM} & my sf((subject of newEvt)) & {AS_DELIM} & my sf((start time of newEvt as string)) & {AS_DELIM} & my sf((end time of newEvt as string))
+    return my sf(id of newEvt) & {AS_DELIM} & my sf((subject of newEvt)) & {AS_DELIM} & my sf((start time of newEvt)) & {AS_DELIM} & my sf((end time of newEvt))
 end tell'''
 
     try:
@@ -2100,8 +2458,16 @@ async def create_meeting(
     Returns:
         Confirmation that the meeting was created.
     """
-    start_dt = datetime.fromisoformat(start)
-    end_dt = datetime.fromisoformat(end)
+    if err := await _no_mail_account_error("create a meeting with invitations"):
+        return err
+    start_dt, err = _parse_when(start, "start")
+    if err:
+        return err
+    end_dt, err = _parse_when(end, "end")
+    if err:
+        return err
+    if end_dt < start_dt:
+        return "Error: end is before start."
 
     props = f'subject:"{escape(subject)}", start time:{format_date(start_dt)}, end time:{format_date(end_dt)}'
     if location:
@@ -2123,7 +2489,7 @@ async def create_meeting(
     script = f'''tell application "Microsoft Outlook"
     set newEvt to make new calendar event with properties {{{props}}}
     {attendee_lines}
-    return (id of newEvt as text)
+    return my sf(id of newEvt)
 end tell'''
 
     try:
@@ -2165,12 +2531,19 @@ async def update_event(
     set_lines = ""
     if subject:
         set_lines += f'set subject of e to "{escape(subject)}"\n'
+    start_dt = end_dt = None
     if start:
-        start_dt = datetime.fromisoformat(start)
+        start_dt, err = _parse_when(start, "start")
+        if err:
+            return err
         set_lines += f'set start time of e to {format_date(start_dt)}\n'
     if end:
-        end_dt = datetime.fromisoformat(end)
+        end_dt, err = _parse_when(end, "end")
+        if err:
+            return err
         set_lines += f'set end time of e to {format_date(end_dt)}\n'
+    if start_dt and end_dt and end_dt < start_dt:
+        return "Error: end is before start."
     if location:
         set_lines += f'set location of e to "{escape(location)}"\n'
     if body:
@@ -2185,7 +2558,7 @@ async def update_event(
     script = f'''tell application "Microsoft Outlook"
     set e to calendar event id {entry_id}
     {set_lines}
-    return my sf((id of e as text)) & {AS_DELIM} & my sf((subject of e)) & {AS_DELIM} & my sf((start time of e as string)) & {AS_DELIM} & my sf((end time of e as string)) & {AS_DELIM} & my sf((location of e))
+    return my sf(id of e) & {AS_DELIM} & my sf((subject of e)) & {AS_DELIM} & my sf((start time of e)) & {AS_DELIM} & my sf((end time of e)) & {AS_DELIM} & my sf((location of e))
 end tell'''
 
     try:
@@ -2264,6 +2637,17 @@ async def search_events(
     Returns:
         JSON array of matching event summaries.
     """
+    if err := _bad_count("count", count):
+        return err
+    now = datetime.now()
+    range_start, err = _parse_when(start_date, "start_date") if start_date else (now - timedelta(days=30), None)
+    if err:
+        return err
+    range_end, err = _parse_when(end_date, "end_date") if end_date else (now + timedelta(days=30), None)
+    if err:
+        return err
+    if range_end < range_start:
+        return "Error: end_date is before start_date."
     safe_query = escape(query)
 
     evt_spec = f'(every calendar event whose subject contains "{safe_query}")'
@@ -2294,11 +2678,11 @@ async def search_events(
         end try
         set estart to ""
         try
-            set estart to (item i of startList) as string
+            set estart to (item i of startList)
         end try
         set eend to ""
         try
-            set eend to (item i of endList) as string
+            set eend to (item i of endList)
         end try
         set elocation to ""
         try
@@ -2312,7 +2696,7 @@ async def search_events(
         try
             set eallday to item i of alldayList
         end try
-        set output to output & my sf(((item i of idList) as text)) & {AS_DELIM} & my sf(esubject) & {AS_DELIM} & my sf(estart) & {AS_DELIM} & my sf(eend) & {AS_DELIM} & my sf(elocation) & {AS_DELIM} & my sf(eorganizer) & {AS_DELIM} & my sf((eallday as text)) & {AS_RECORD_DELIM}
+        set output to output & my sf(item i of idList) & {AS_DELIM} & my sf(esubject) & {AS_DELIM} & my sf(estart) & {AS_DELIM} & my sf(eend) & {AS_DELIM} & my sf(elocation) & {AS_DELIM} & my sf(eorganizer) & {AS_DELIM} & my sf(eallday) & {AS_RECORD_DELIM}
     end repeat
     return output
 end tell'''
@@ -2327,8 +2711,8 @@ end tell'''
         set e to item i of evts
         set eid to id of e
         set esubject to subject of e
-        set estart to start time of e as string
-        set eend to end time of e as string
+        set estart to start time of e
+        set eend to end time of e
         set elocation to ""
         try
             set elocation to location of e
@@ -2338,7 +2722,7 @@ end tell'''
             set eorganizer to organizer of e
         end try
         set eallday to all day flag of e
-        set output to output & my sf((eid as text)) & {AS_DELIM} & my sf(esubject) & {AS_DELIM} & my sf(estart) & {AS_DELIM} & my sf(eend) & {AS_DELIM} & my sf(elocation) & {AS_DELIM} & my sf(eorganizer) & {AS_DELIM} & my sf((eallday as text)) & {AS_RECORD_DELIM}
+        set output to output & my sf(eid) & {AS_DELIM} & my sf(esubject) & {AS_DELIM} & my sf(estart) & {AS_DELIM} & my sf(eend) & {AS_DELIM} & my sf(elocation) & {AS_DELIM} & my sf(eorganizer) & {AS_DELIM} & my sf(eallday) & {AS_RECORD_DELIM}
     end repeat
     return output
 end tell'''
@@ -2365,6 +2749,20 @@ end tell'''
                 "organizer": _clean(parts[5]),
                 "all_day": parts[6].strip().lower() == "true",
             })
+
+        # Keep events that overlap the range; unparseable starts are kept.
+        def _dt(v):
+            try:
+                return datetime.fromisoformat(v)
+            except ValueError:
+                return None
+        kept = []
+        for ev in results:
+            st, en = _dt(ev["start"]), _dt(ev["end"])
+            if st is None or (st <= range_end and (en or st) >= range_start):
+                kept.append((st, ev))
+        kept.sort(key=lambda pair: pair[0] or datetime.max)
+        results = [ev for _, ev in kept[:count]]
         return await _results_json(results, "matching events")
     except Exception as e:
         return f"Error searching events: {e}"
@@ -2392,6 +2790,8 @@ async def list_tasks(
     Returns:
         JSON array of task summary objects.
     """
+    if err := _bad_count("count", count):
+        return err
     completed_filter = "" if include_completed else " whose todo flag is not completed"
 
     if include_completed:
@@ -2420,7 +2820,7 @@ async def list_tasks(
         end try
         set tdue to ""
         try
-            set tdue to (item i of dueList) as string
+            set tdue to (item i of dueList)
         end try
         set tflag to ""
         try
@@ -2430,7 +2830,7 @@ async def list_tasks(
         try
             set tpriority to (item i of priList) as text
         end try
-        set output to output & my sf(((item i of idList) as text)) & {AS_DELIM} & my sf(tname) & {AS_DELIM} & my sf(tdue) & {AS_DELIM} & my sf(tflag) & {AS_DELIM} & my sf(tpriority) & {AS_RECORD_DELIM}
+        set output to output & my sf(item i of idList) & {AS_DELIM} & my sf(tname) & {AS_DELIM} & my sf(tdue) & {AS_DELIM} & my sf(tflag) & {AS_DELIM} & my sf(tpriority) & {AS_RECORD_DELIM}
     end repeat
     return output
 end tell'''
@@ -2447,11 +2847,11 @@ end tell'''
         set tname to name of t
         set tdue to ""
         try
-            set tdue to due date of t as string
+            set tdue to due date of t
         end try
         set tflag to todo flag of t
         set tpriority to priority of t
-        set output to output & my sf((tid as text)) & {AS_DELIM} & my sf(tname) & {AS_DELIM} & my sf(tdue) & {AS_DELIM} & my sf((tflag as text)) & {AS_DELIM} & my sf((tpriority as text)) & {AS_RECORD_DELIM}
+        set output to output & my sf(tid) & {AS_DELIM} & my sf(tname) & {AS_DELIM} & my sf(tdue) & {AS_DELIM} & my sf(tflag) & {AS_DELIM} & my sf(tpriority) & {AS_RECORD_DELIM}
     end repeat
     return output
 end tell'''
@@ -2474,7 +2874,7 @@ end tell'''
                 "subject": parts[1].strip() or "(no subject)",
                 "due_date": _clean(parts[2]) or None,
                 "complete": parts[3].strip() == "completed",
-                "priority": parts[4].strip(),
+                "priority": _priority_name(parts[4]),
             })
         return await _results_json(results, "tasks")
     except Exception as e:
@@ -2500,7 +2900,7 @@ async def get_task(entry_id: str) -> str:
     set tname to name of t
     set tdue to ""
     try
-        set tdue to due date of t as string
+        set tdue to due date of t
     end try
     set tflag to todo flag of t
     set tpriority to priority of t
@@ -2510,9 +2910,9 @@ async def get_task(entry_id: str) -> str:
     end try
     set tstartdate to ""
     try
-        set tstartdate to start date of t as string
+        set tstartdate to start date of t
     end try
-    return my sf((tid as text)) & {AS_DELIM} & my sf(tname) & {AS_DELIM} & my sf(tdue) & {AS_DELIM} & my sf((tflag as text)) & {AS_DELIM} & my sf((tpriority as text)) & {AS_DELIM} & my sf(tbody) & {AS_DELIM} & my sf(tstartdate)
+    return my sf(tid) & {AS_DELIM} & my sf(tname) & {AS_DELIM} & my sf(tdue) & {AS_DELIM} & my sf(tflag) & {AS_DELIM} & my sf(tpriority) & {AS_DELIM} & my sf(tbody) & {AS_DELIM} & my sf(tstartdate)
 end tell'''
 
     try:
@@ -2526,7 +2926,7 @@ end tell'''
             "subject": parts[1].strip() or "(no subject)",
             "due_date": _clean(parts[2]) or None,
             "complete": parts[3].strip() == "completed",
-            "priority": parts[4].strip(),
+            "priority": _priority_name(parts[4]),
             "body": _truncate(_clean(parts[5])),
             "start_date": _clean(parts[6]) or None,
         }
@@ -2554,18 +2954,23 @@ async def create_task(
         Confirmation with task subject and entry_id.
     """
     imp_map = {"low": "priority low", "normal": "priority normal", "high": "priority high"}
-    imp_val = imp_map.get(importance.lower(), "priority normal")
+    imp_key = (importance or "normal").strip().lower()
+    if imp_key not in imp_map:
+        return f"Error: importance must be 'low', 'normal' or 'high' (got {importance!r})."
+    imp_val = imp_map[imp_key]
 
     props = f'name:"{escape(subject)}", priority:{imp_val}'
     if due_date:
-        due_dt = datetime.fromisoformat(due_date)
+        due_dt, err = _parse_when(due_date, "due_date")
+        if err:
+            return err
         props += f', due date:{format_date(due_dt)}'
     if body:
         props += f', content:"{escape(text_to_html(body))}"'
 
     script = f'''tell application "Microsoft Outlook"
     set newTask to make new task with properties {{{props}}}
-    return my sf((id of newTask as text)) & {AS_DELIM} & my sf((name of newTask))
+    return my sf(id of newTask) & {AS_DELIM} & my sf((name of newTask))
 end tell'''
 
     try:
@@ -2575,7 +2980,7 @@ end tell'''
             "status": "created",
             "entry_id": parts[0].strip() if len(parts) > 0 else "",
             "subject": parts[1].strip() if len(parts) > 1 else subject,
-            "due_date": due_date or None,
+            "due_date": due_dt.isoformat() if due_date else None,
         }
         return json.dumps(result, indent=2, default=str)
     except Exception as e:
@@ -2663,7 +3068,7 @@ async def list_attachments(entry_id: str) -> str:
         set a to item i of attList
         set aname to name of a
         set asize to file size of a
-        set output to output & my sf((i as text)) & {AS_DELIM} & my sf(aname) & {AS_DELIM} & my sf((asize as text)) & {AS_RECORD_DELIM}
+        set output to output & my sf(i) & {AS_DELIM} & my sf(aname) & {AS_DELIM} & my sf(asize) & {AS_RECORD_DELIM}
     end repeat
     return output
 end tell'''
@@ -2715,6 +3120,8 @@ async def save_attachment(
     Returns:
         JSON with the saved file name and path, or an error.
     """
+    if err := _bad_count("attachment_index", attachment_index):
+        return err
     if err := _bad_message_id(entry_id):
         return err
     entry_id = entry_id.strip()

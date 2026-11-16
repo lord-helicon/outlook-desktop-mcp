@@ -68,6 +68,8 @@ class FakeBridge:
         self.output, self.scripts = output, []
 
     async def run(self, script, timeout=None):
+        if "outline 1 of scroll area 1" in script:
+            return "Inbox; 0 unread messages"  # sidebar folder check
         self.scripts.append(script)
         return self.output
 
