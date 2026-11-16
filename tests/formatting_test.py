@@ -143,6 +143,7 @@ def test_summary_for_every_item_type():
 def test_own_error_messages_reach_the_caller():
     assert format_com_error(ValueError("Account 'x' not found.")) == "Account 'x' not found."
     assert "timed out" in format_com_error(TimeoutError("COM operation timed out"))
+    assert "restored" in format_com_error(ConnectionError("connection has been restored"))
     assert format_com_error(RuntimeError("C:\\secret\\path")) == "An unexpected error occurred."
 
 
