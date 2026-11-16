@@ -266,7 +266,7 @@ pip install "mcp[cli]" -e .
 Register from source:
 
 ```bash
-claude mcp add outlook-desktop -- /path/to/outlook-desktop-mcp-plus/.venv/bin/python -m outlook_desktop_mcp
+claude mcp add outlook-desktop -- /path/to/outlook-desktop-mcp-plus/.venv/bin/outlook-desktop-mcp-plus
 ```
 
 ## Usage Examples

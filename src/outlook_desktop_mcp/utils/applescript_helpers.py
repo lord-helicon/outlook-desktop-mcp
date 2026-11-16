@@ -16,6 +16,18 @@ def escape(text: str) -> str:
     return text
 
 
+def text_to_html(text: str) -> str:
+    """Plain text -> HTML that displays the same characters.
+
+    Outlook for Mac's `content` property is HTML (see its AppleScript
+    dictionary), so plain text written there must be HTML-escaped, or markup
+    in it (e.g. quoted from a sender's email) would render as live HTML.
+    """
+    import html
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return html.escape(text, quote=False).replace("\n", "<br>")
+
+
 def format_date(dt: datetime) -> str:
     """Convert a Python datetime to a locale-independent AppleScript date.
 
@@ -119,7 +131,12 @@ def resolve_folder_ref(folder_name: str) -> str:
     if key in FOLDER_MAP:
         return FOLDER_MAP[key]
     # Custom folder — search by name
-    return f'mail folder "{escape(folder_name)}"'
+    return f'mail folder "{escape(folder_name.strip())}"'
+
+
+def is_builtin_folder(folder_name: str) -> bool:
+    """True if resolve_folder_ref maps this name to a built-in folder keyword."""
+    return folder_name.lower().strip() in FOLDER_MAP
 
 
 # Separators for structured AppleScript output.
