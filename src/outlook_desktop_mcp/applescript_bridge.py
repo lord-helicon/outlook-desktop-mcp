@@ -9,10 +9,37 @@ Every tool builds an AppleScript string and passes it to bridge.run().
 import asyncio
 import logging
 import os
+import re
 
 from outlook_desktop_mcp.utils.applescript_helpers import SANITIZE_HANDLER
 
 logger = logging.getLogger("outlook_desktop_mcp.applescript_bridge")
+
+# "Can't get message id 9.99999999E+8. (-1728)" -> "Outlook has no message with id 999999999."
+_NOT_FOUND = re.compile(
+    r"Can.t get (message|calendar event|task|contact|mail folder)(?: id)? (.+?)\. \(-1728\)"
+)
+
+
+def friendly_error(err: str) -> str | None:
+    """Readable text for Outlook's "not found" errors (-1728), else None.
+
+    AppleScript prints ids above 2^29 as reals in scientific notation and
+    folder names with escaped quotes; both are turned back into what the
+    caller passed in.
+    """
+    m = _NOT_FOUND.search(err)
+    if not m:
+        return None
+    kind, target = m.group(1), m.group(2).strip()
+    if len(target) >= 2 and target[0] == target[-1] == '"':
+        target = target[1:-1].replace('\\"', '"')
+    if re.fullmatch(r"[0-9]+(?:[.,][0-9]+)?E\+[0-9]+", target):
+        target = str(int(float(target.replace(",", "."))))
+    if kind == "mail folder":
+        return (f"Outlook has no folder named '{target}'. "
+                "Call list_folders to see the available folders.")
+    return f"Outlook has no {kind} with id {target}."
 
 
 def _env_timeout(name: str, default: float) -> float:
@@ -89,7 +116,7 @@ class AppleScriptBridge:
 
         if proc.returncode != 0:
             err = stderr.decode("utf-8", errors="replace").strip()
-            raise RuntimeError(f"AppleScript error: {err}")
+            raise RuntimeError(friendly_error(err) or f"AppleScript error: {err}")
 
         return stdout.decode("utf-8", errors="replace").strip()
 

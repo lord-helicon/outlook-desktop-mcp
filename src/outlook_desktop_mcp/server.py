@@ -55,7 +55,7 @@ from outlook_desktop_mcp.utils.attachments import (
     safe_filename,
     unique_path,
 )
-from outlook_desktop_mcp.utils.output import compact_json_tools
+from outlook_desktop_mcp.utils.output import compact_json_tools, set_server_version
 
 # --- Logging (all to stderr, stdout is reserved for MCP JSON-RPC) ---
 
@@ -120,6 +120,7 @@ mcp = FastMCP(
 
 # Every tool result leaves the server as compact JSON (see utils/output.py).
 compact_json_tools(mcp)
+set_server_version(mcp)
 
 bridge = OutlookBridge()
 

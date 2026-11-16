@@ -251,7 +251,7 @@ def test_empty_results_explain_new_outlook():
     calls = {
         "list_drafts": lambda: server_mac.list_drafts(),
         "list_emails (sent items)": lambda: server_mac.list_emails(folder="sent items", count=5),
-        "search_emails": lambda: server_mac.search_emails(query="x"),
+        "search_emails (sent items)": lambda: server_mac.search_emails(query="x", folder="sent items"),
         "list_events": lambda: server_mac.list_events(start_date="2026-11-16", end_date="2026-11-23"),
         "search_events": lambda: server_mac.search_events(query="x"),
         "list_tasks": lambda: server_mac.list_tasks(),
@@ -295,14 +295,14 @@ def test_fingerprint_ignores_read_state():
     fake = FakeBridge(output=row("A", "one") + RECORD_DELIM)
     asyncio.run(server_mac._ui_list_messages(fake, 5))
     check("rows script emits empty record on error",
-          'on error\n        set output to output & (character id 2)' in fake.scripts[0],
+          'on error\n            set output to output & (character id 2)' in fake.scripts[0],
           fake.scripts[0])
 
 
 def make_ui_handler(rows, pane, selected):
     """Fake System Events: list script returns rows, select records the row."""
     def handler(script):
-        if "set rowList to rows" in script:
+        if "set rowCount to count of rows" in script:
             return "".join(r + RECORD_DELIM for r in rows)
         m = re.search(r"select row (\d+)", script)
         if m:
@@ -363,7 +363,7 @@ def test_read_email_ui_id():
 
     # select fails on both layouts -> clear JSON error
     def failing(script):
-        if "set rowList to rows" in script:
+        if "set rowCount to count of rows" in script:
             return "".join(r + RECORD_DELIM for r in rows)
         raise RuntimeError("no table")
     server_mac.bridge = FakeBridge(handler=failing)

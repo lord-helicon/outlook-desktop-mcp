@@ -157,6 +157,12 @@ AS_RECORD_DELIM = "(character id 2)"
 
 SANITIZE_HANDLER = """on sf(v)
 \tif v is missing value then return ""
+\t-- Dates: locale-independent ISO 8601. Reals: Outlook ids above 2^29 are
+\t-- reals in AppleScript and would print as 2.130706432E+9; write digits.
+\tif class of v is date then return my isod(v)
+\tif class of v is real then
+\t\tif v mod 1 = 0 then return my idt(v)
+\tend if
 \ttry
 \t\tset t to v as text
 \ton error
@@ -170,4 +176,23 @@ SANITIZE_HANDLER = """on sf(v)
 \tset AppleScript's text item delimiters to od
 \treturn t
 end sf
+on idt(n)
+\tif n < 0 then return "-" & my idt(-n)
+\tset s to ""
+\trepeat
+\t\tset s to ((n mod 10) as integer as text) & s
+\t\tset n to n div 10
+\t\tif n = 0 then exit repeat
+\tend repeat
+\treturn s
+end idt
+on p2(n)
+\tset n to n as integer
+\tif n < 10 then return "0" & n
+\treturn n as text
+end p2
+on isod(d)
+\tset s to time of d
+\treturn ((year of d) as integer as text) & "-" & my p2((month of d) as integer) & "-" & my p2(day of d) & "T" & my p2(s div 3600) & ":" & my p2((s mod 3600) div 60) & ":" & my p2(s mod 60)
+end isod
 """

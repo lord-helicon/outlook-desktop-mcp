@@ -144,7 +144,8 @@ def test_list_events_batches():
           "whose start time ≥ rangeStart and start time ≤ rangeEnd" in script)
     check("locale-safe date construction", "set year of rangeStart to 2026" in script
           and "set month of rangeStart to 8" in script)
-    check("iso date output", "«class isot»" in script)
+    check("dates passed raw to sf (ISO via isod), not coerced to text",
+          " as string" not in script and "«class isot»" not in script and "my sf(estart)" in script)
     check("no per-event property loop", "set esubject to subject of e\n" not in script)
     check("no full calendar materialization", "set evts to calendar events\n" not in script)
     check("result parsed", len(result) == 1 and result[0]["subject"] == "Standup", str(result))

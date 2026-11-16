@@ -62,3 +62,17 @@ def compact_json_tools(mcp):
 
     mcp.tool = tool
     return mcp
+
+
+def set_server_version(mcp, package: str = "outlook-desktop-mcp-plus") -> None:
+    """Report this package's version in the MCP handshake.
+
+    FastMCP takes no version argument, so the low-level server falls back to
+    the version of the `mcp` library (e.g. "1.30.0"). Running from a source
+    checkout without installing leaves that fallback in place.
+    """
+    from importlib.metadata import PackageNotFoundError, version
+    try:
+        mcp._mcp_server.version = version(package)
+    except (PackageNotFoundError, AttributeError):
+        pass

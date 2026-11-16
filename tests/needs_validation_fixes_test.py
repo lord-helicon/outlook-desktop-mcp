@@ -176,7 +176,7 @@ def test_mac_send_draft_guard():
     cap = Capture("s" + "\x01" + "to@example.invalid")
     server_mac.bridge = cap
     asyncio.run(server_mac.send_draft(draft_id="12"))
-    s = cap.scripts[0]
+    s = next(x for x in cap.scripts if "send m" in x)
     guard_pos = min(s.find("is not outgoing message"), s.find("was sent of m"))
     check("checks class outgoing message", "class of m is not outgoing message" in s)
     check("checks was sent", "if was sent of m then error" in s)
@@ -219,7 +219,7 @@ def test_mac_bodies_escaped():
     cap = Capture("1"); server_mac.bridge = cap
     asyncio.run(server_mac.send_email(to="a@example.invalid", subject="s", body="", html_body="<p>x</p>"))
     check("html_body uses `content`, not the non-existent `html content`",
-          'content:"<p>x</p>"' in cap.scripts[0] and "html content" not in cap.scripts[0])
+          any('content:"<p>x</p>"' in x for x in cap.scripts) and not any("html content" in x for x in cap.scripts))
     check("text_to_html keeps line breaks", text_to_html("a\nb") == "a<br>b")
 
 
