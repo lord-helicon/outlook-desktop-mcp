@@ -299,6 +299,72 @@ def test_list_events_invalid_date_is_clear_error():
     assert _run(server.search_events("q", end_date="junk")).startswith("Error: Invalid end_date")
 
 
+# --- 3. reply_email keeps HTML ------------------------------------------------
+
+class FakeReply:
+    def __init__(self, fmt, html="", text=""):
+        self.BodyFormat = fmt
+        self._html = html
+        self._text = text
+        self.set_body = None
+        self.set_html = None
+        self.sent = False
+
+    @property
+    def HTMLBody(self):
+        return self._html
+
+    @HTMLBody.setter
+    def HTMLBody(self, v):
+        self.set_html = v
+        self._html = v
+
+    @property
+    def Body(self):
+        return self._text
+
+    @Body.setter
+    def Body(self, v):
+        self.set_body = v
+        self._text = v
+
+    def Send(self):
+        self.sent = True
+
+
+class FakeMail:
+    def __init__(self, reply):
+        self.Class = server._OL_CLASS_MAIL
+        self.Subject = "Hello"
+        self._reply = reply
+
+    def Reply(self):
+        return self._reply
+
+    def ReplyAll(self):
+        return self._reply
+
+
+def test_reply_email_html_thread_stays_html():
+    thread = "<html><body><p>Original</p></body></html>"
+    reply = FakeReply(server._OL_FORMAT_HTML, html=thread, text="Original")
+    _use(namespace=FakeNamespace(items_by_id={"m": FakeMail(reply)}))
+    out = _run(server.reply_email("m", "Line1\nA & B"))
+    assert out.startswith("Reply sent"), out
+    assert reply.sent
+    assert reply.set_body is None, "must not assign .Body on an HTML thread"
+    assert reply.set_html == "<html><body>Line1<br>A &amp; B<br><br><p>Original</p></body></html>"
+
+
+def test_reply_email_plain_thread_stays_plain():
+    reply = FakeReply(1, html="", text="> orig")
+    _use(namespace=FakeNamespace(items_by_id={"m": FakeMail(reply)}))
+    _run(server.reply_email("m", "Hi"))
+    assert reply.set_html is None
+    assert reply.set_body == "Hi\n\n> orig"
+    assert reply.sent
+
+
 if __name__ == "__main__":
     test_list_events_uses_overlap_filter_and_keeps_call_order()
     test_search_events_uses_overlap_filter()
@@ -311,4 +377,6 @@ if __name__ == "__main__":
     test_update_event_assigns_datetimes_and_is_atomic_on_bad_input()
     test_create_task_assigns_datetime_due_date()
     test_list_events_invalid_date_is_clear_error()
+    test_reply_email_html_thread_stays_html()
+    test_reply_email_plain_thread_stays_plain()
     print("OK")

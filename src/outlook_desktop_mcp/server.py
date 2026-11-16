@@ -901,7 +901,7 @@ async def reply_email(
             return err
         subject = item.Subject
         reply_item = item.ReplyAll() if reply_all else item.Reply()
-        reply_item.Body = body + "\n\n" + reply_item.Body
+        _prepend_reply_text(reply_item, body)
         reply_item.Send()
         return f"Reply sent to '{subject}' (reply_all={reply_all})"
 
@@ -930,6 +930,20 @@ def _prepend_html(fragment: str, html_doc: str) -> str:
 def _text_to_html(text: str) -> str:
     import html
     return html.escape(text).replace("\r\n", "\n").replace("\n", "<br>")
+
+
+def _prepend_reply_text(reply_item, body: str, html_body: str = "") -> None:
+    """Put reply text above the quoted thread of a reply item.
+
+    HTML threads stay HTML (assigning ``.Body`` on an HTML item would flatten
+    the whole thread to plain text); plain-text threads stay plain text unless
+    the caller supplies ``html_body``.
+    """
+    if html_body or reply_item.BodyFormat == _OL_FORMAT_HTML:
+        fragment = html_body or _text_to_html(body)
+        reply_item.HTMLBody = _prepend_html(fragment + "<br><br>", reply_item.HTMLBody)
+    else:
+        reply_item.Body = body + "\n\n" + reply_item.Body
 
 
 # =====================================================================
@@ -973,12 +987,7 @@ async def create_draft_reply(
             return err
         original_subject = item.Subject
         reply_item = item.ReplyAll() if reply_all else item.Reply()
-        if html_body or reply_item.BodyFormat == _OL_FORMAT_HTML:
-            # Keep the thread's HTML formatting intact.
-            fragment = html_body or _text_to_html(body)
-            reply_item.HTMLBody = _prepend_html(fragment + "<br><br>", reply_item.HTMLBody)
-        else:
-            reply_item.Body = body + "\n\n" + reply_item.Body
+        _prepend_reply_text(reply_item, body, html_body)
         reply_item.Save()
         return json.dumps({
             "status": "draft_reply_created",
