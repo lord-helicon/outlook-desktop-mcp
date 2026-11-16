@@ -1,4 +1,4 @@
-# Contributing to outlook-desktop-mcp
+# Contributing to outlook-desktop-mcp-plus
 
 ## Branching Strategy
 
@@ -30,8 +30,8 @@ feature/your-change → PR → preview → PR → main → auto-publish to PyPI
 Requires Windows with Outlook Desktop (Classic) running.
 
 ```bash
-git clone https://github.com/YOUR-USERNAME/outlook-desktop-mcp.git
-cd outlook-desktop-mcp
+git clone https://github.com/YOUR-USERNAME/outlook-desktop-mcp-plus.git
+cd outlook-desktop-mcp-plus
 python -m venv .venv
 .venv\Scripts\activate
 pip install pywin32 "mcp[cli]" -e .

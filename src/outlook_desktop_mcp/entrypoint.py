@@ -1,4 +1,4 @@
-"""Platform-aware entry point for outlook-desktop-mcp.
+"""Platform-aware entry point for outlook-desktop-mcp-plus.
 
 Detects the OS and imports the correct server module:
 - macOS → server_mac (AppleScript automation)

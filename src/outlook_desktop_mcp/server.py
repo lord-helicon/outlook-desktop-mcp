@@ -85,7 +85,7 @@ def _check_item_class(item, expected_class: int, label: str) -> str | None:
 # --- MCP Server ---
 
 mcp = FastMCP(
-    "outlook-desktop-mcp",
+    "outlook-desktop-mcp-plus",
     instructions=(
         "This MCP server gives you full access to Microsoft Outlook Desktop on "
         "Windows via COM automation. It can send emails, read inbox messages, "

@@ -60,7 +60,7 @@ def _bad_message_id(message_id: str, kind: str = "message") -> str | None:
 # --- MCP Server ---
 
 mcp = FastMCP(
-    "outlook-desktop-mcp",
+    "outlook-desktop-mcp-plus",
     instructions=(
         "This MCP server gives you full access to Microsoft Outlook on macOS "
         "via AppleScript automation. It can send emails, read inbox messages, "

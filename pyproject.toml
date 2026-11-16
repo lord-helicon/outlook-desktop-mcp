@@ -1,11 +1,11 @@
 [project]
-name = "outlook-desktop-mcp"
-version = "0.3.0"
-description = "Outlook Desktop as an MCP server — Windows (COM) and macOS (AppleScript). No Graph API, no Entra app registration — just your local Outlook."
+name = "outlook-desktop-mcp-plus"
+version = "0.4.0"
+description = "Maintained fork of outlook-desktop-mcp: Outlook Desktop as an MCP server — Windows (COM) and macOS (AppleScript). No Graph API, no Entra app registration — just your local Outlook."
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [
-    { name = "Andreas Martin Aanerud", email = "aaanerud@microsoft.com" },
+    { name = "Alexander Rolli" },
 ]
 keywords = ["mcp", "outlook", "email", "com", "applescript", "automation", "windows", "macos", "microsoft", "claude"]
 classifiers = [
@@ -25,11 +25,13 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/lord-helicon/outlook-desktop-mcp"
-Repository = "https://github.com/lord-helicon/outlook-desktop-mcp"
-Issues = "https://github.com/lord-helicon/outlook-desktop-mcp/pulls"
+Homepage = "https://github.com/lord-helicon/outlook-desktop-mcp-plus"
+Repository = "https://github.com/lord-helicon/outlook-desktop-mcp-plus"
+Issues = "https://github.com/lord-helicon/outlook-desktop-mcp-plus/pulls"
 
 [project.scripts]
+outlook-desktop-mcp-plus = "outlook_desktop_mcp.entrypoint:main"
+# Same command name as upstream, so existing MCP client configs keep working.
 outlook-desktop-mcp = "outlook_desktop_mcp.entrypoint:main"
 
 [build-system]
