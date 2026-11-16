@@ -260,6 +260,15 @@ def test_folder_switching():
     res = json.loads(call(server_mac.read_email(entry_id=f"ui-2-{fp}", folder="sent")))
     check("read_email ui id in Sent", res.get("subject") == "Lunch" and fake.selects() == [5, 2], str(res)[:100] + str(fake.selects()))
 
+    fake = Fake(accounts="0", handler=ui_handler(), sidebar=SIDEBAR + ("Junk", "Junk Email; 44 messages"), selected=2)
+    server_mac.bridge = fake
+    call(server_mac.list_emails(folder="junk", count=5))
+    check("'junk' picks Junk Email over a custom folder named Junk", fake.selects() == [8, 2], str(fake.selects()))
+    fake = Fake(accounts="0", handler=ui_handler(), sidebar=SIDEBAR + ("Projects",), selected=2)
+    server_mac.bridge = fake
+    call(server_mac.list_emails(folder="projects", count=5))
+    check("custom folder by name", fake.selects() == [7, 2], str(fake.selects()))
+
     fake = Fake(accounts="0", handler=ui_handler(), sidebar=None)
     server_mac.bridge = fake
     out = call(server_mac.list_emails(folder="sent", count=5))

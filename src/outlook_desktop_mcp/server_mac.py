@@ -271,26 +271,28 @@ def _is_ui_access_denied(error: BaseException) -> bool:
 # Sidebar names of the standard folders in New Outlook, per language (the
 # label is "<name>; N unread messages"). Keys follow FOLDER_MAP's targets.
 _UI_FOLDER_ALIASES = {
-    "inbox": {"inbox", "posteingang", "innboks", "inkorg", "indbakke",
+    # Ordered: the first name found in the sidebar wins, so the standard
+    # folder beats a custom folder with a generic name (e.g. "Junk").
+    "inbox": ("inbox", "posteingang", "innboks", "inkorg", "indbakke",
               "boîte de réception", "bandeja de entrada", "posta in arrivo",
               "caixa de entrada", "postvak in", "skrzynka odbiorcza",
-              "受信トレイ", "收件箱", "收件匣", "받은 편지함"},
-    "sent items": {"sent", "sent items", "sent mail", "gesendete elemente", "gesendet",
+              "受信トレイ", "收件箱", "收件匣", "받은 편지함"),
+    "sent items": ("sent items", "sent", "sent mail", "gesendete elemente", "gesendet",
                    "éléments envoyés", "elementos enviados", "posta inviata",
-                   "sendte elementer", "sendt", "skickat", "verzonden items"},
-    "drafts": {"drafts", "entwürfe", "brouillons", "borradores", "bozze",
-               "kladder", "utkast", "concepten"},
-    "deleted items": {"deleted items", "gelöschte elemente", "éléments supprimés",
+                   "sendte elementer", "sendt", "skickat", "verzonden items"),
+    "drafts": ("drafts", "entwürfe", "brouillons", "borradores", "bozze",
+               "kladder", "utkast", "concepten"),
+    "deleted items": ("deleted items", "gelöschte elemente", "éléments supprimés",
                       "elementos eliminados", "posta eliminata", "slettede elementer",
-                      "borttagna objekt", "verwijderde items"},
-    "junk mail": {"junk email", "junk e-mail", "junk", "junk-e-mail", "spam",
-                  "courrier indésirable", "correo no deseado", "posta indesiderata",
-                  "søppelpost", "skräppost", "ongewenste e-mail"},
-    "outbox": {"outbox", "postausgang", "boîte d'envoi", "bandeja de salida",
-               "posta in uscita", "utboks", "utkorgen", "postvak uit"},
-    "archive": {"archive", "archiv", "archives", "archivo", "archivio", "arkiv", "archief"},
+                      "borttagna objekt", "verwijderde items", "trash", "deleted"),
+    "junk mail": ("junk email", "junk e-mail", "junk-e-mail", "courrier indésirable",
+                  "correo no deseado", "posta indesiderata", "søppelpost", "skräppost",
+                  "ongewenste e-mail", "junk mail", "junk", "spam"),
+    "outbox": ("outbox", "postausgang", "boîte d'envoi", "bandeja de salida",
+               "posta in uscita", "utboks", "utkorgen", "postvak uit"),
+    "archive": ("archive", "archiv", "archives", "archivo", "archivio", "arkiv", "archief"),
 }
-_UI_INBOX_NAMES = _UI_FOLDER_ALIASES["inbox"]
+_UI_INBOX_NAMES = set(_UI_FOLDER_ALIASES["inbox"])
 _UI_SIDEBAR = "outline 1 of scroll area 1 of splitter group 1 of window 1"
 # Seconds for the message list to load after selecting a folder.
 _UI_FOLDER_SETTLE_SECONDS = 1.2
@@ -304,11 +306,12 @@ class UIUnavailableError(RuntimeError):
     """The Outlook window can't be used for this request (unknown layout)."""
 
 
-def _ui_folder_names(folder: str) -> set[str]:
-    """Sidebar names that count as `folder` (lower-case)."""
+def _ui_folder_names(folder: str) -> list[str]:
+    """Sidebar names that count as `folder` (lower-case), best match first."""
     key = (folder or "inbox").strip().lower()
     key = FOLDER_MAP.get(key, key)
-    return _UI_FOLDER_ALIASES.get(key, set()) | {key}
+    names = list(_UI_FOLDER_ALIASES.get(key, ()))
+    return names if key in names else names + [key]
 
 
 def _ui_label_name(label: str) -> str:
@@ -366,15 +369,18 @@ async def _ui_in_folder(bridge_obj, folder: str, action):
     names = _ui_folder_names(folder)
     side = await _ui_sidebar(bridge_obj)
     if side is None:
-        if names & _UI_INBOX_NAMES:
+        if _UI_INBOX_NAMES.intersection(names):
             return await action()
         raise UIUnavailableError(
             f"Can't read Outlook's folder list, so the folder '{folder}' can't be opened."
         )
     current = next((r for r in side if r[2]), None)
-    if current and current[1].lower() in names:
+    by_name = {}
+    for r in side:
+        by_name.setdefault(r[1].lower(), r)  # first row per name (Favorites first)
+    target = next((by_name[n] for n in names if n in by_name), None)
+    if current and target and current[1].lower() == target[1].lower():
         return await action()
-    target = next((r for r in side if r[1].lower() in names), None)
     if target is None:
         raise UIWrongFolderError(
             f"Outlook's folder list has no folder '{folder}'. If it is a subfolder, "
