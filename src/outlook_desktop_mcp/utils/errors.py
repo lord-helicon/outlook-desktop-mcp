@@ -14,5 +14,10 @@ def format_com_error(e: Exception) -> str:
             return f"COM Error (0x{hr & 0xFFFFFFFF:08X}): {msg}"
     except Exception:
         pass
+    # Raised by our own code with messages meant for the caller: unknown
+    # account (ValueError), bad ISO date (ValueError from fromisoformat),
+    # the COM bridge's 60s timeout (TimeoutError).
+    if isinstance(e, (ValueError, TimeoutError)):
+        return str(e)
     _logger.warning("Unexpected non-COM exception: %s: %s", type(e).__name__, e)
     return "An unexpected error occurred."
