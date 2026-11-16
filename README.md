@@ -12,11 +12,38 @@ Any MCP client (Claude Code, Claude Desktop, etc.) can then send emails, manage 
 
 ## Quick Start
 
-**1. Install** (requires Python 3.12+):
+**1. Install** (requires Python 3.12+). The recommended way is [uv](https://docs.astral.sh/uv/), which installs the server in its own environment and puts the commands on your PATH:
+
+```bash
+uv tool install outlook-desktop-mcp-plus
+```
+
+<details>
+<summary>Other ways to install, and how to update</summary>
+
+With pipx:
+
+```bash
+pipx install outlook-desktop-mcp-plus
+```
+
+With pip, inside a virtual environment, or on Windows with the python.org installer:
 
 ```bash
 pip install outlook-desktop-mcp-plus
 ```
+
+On macOS with Homebrew Python, a plain `pip install` fails with `externally-managed-environment`. Use uv or pipx instead.
+
+To update with uv:
+
+```bash
+uv tool install --refresh --upgrade outlook-desktop-mcp-plus
+```
+
+`--refresh` makes uv check PyPI again instead of using its cached index. Without it, a release from the last few minutes can show up as "no version found".
+
+</details>
 
 **2. Register with Claude Code:**
 
