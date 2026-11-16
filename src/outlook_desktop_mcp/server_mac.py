@@ -23,13 +23,23 @@ from outlook_desktop_mcp.utils.applescript_helpers import (
     escape,
     format_date,
     parse_date,
+    is_builtin_folder,
     resolve_folder_ref,
+    text_to_html,
     AS_DELIM,
     AS_RECORD_DELIM,
     DELIM,
     RECORD_DELIM,
 )
 from outlook_desktop_mcp.utils.output import compact_json_tools
+from outlook_desktop_mcp.utils.attachments import (
+    attachment_root,
+    is_within,
+    mark_as_downloaded,
+    resolve_save_dir,
+    safe_filename,
+    unique_path,
+)
 from datetime import datetime, timedelta
 
 # --- Logging (all to stderr, stdout is reserved for MCP JSON-RPC) ---
@@ -457,7 +467,9 @@ async def send_email(
     cc_lines = _recipient_lines(cc, "cc recipient") if cc else ""
     bcc_lines = _recipient_lines(bcc, "bcc recipient") if bcc else ""
 
-    content_prop = f'html content:"{escape(html_body)}"' if html_body else f'content:"{escape(body)}"'
+    # `content` is Outlook for Mac's HTML body (there is no `html content`
+    # property); plain text is HTML-escaped so markup in it stays literal.
+    content_prop = f'content:"{escape(html_body)}"' if html_body else f'content:"{escape(text_to_html(body))}"'
 
     script = f'''tell application "Microsoft Outlook"
     set newMsg to make new outgoing message with properties {{subject:"{escape(subject)}", {content_prop}}}
@@ -519,7 +531,9 @@ async def save_draft(
     cc_lines = _recipient_lines(cc, "cc recipient") if cc else ""
     bcc_lines = _recipient_lines(bcc, "bcc recipient") if bcc else ""
 
-    content_prop = f'html content:"{escape(html_body)}"' if html_body else f'content:"{escape(body)}"'
+    # `content` is Outlook for Mac's HTML body (there is no `html content`
+    # property); plain text is HTML-escaped so markup in it stays literal.
+    content_prop = f'content:"{escape(html_body)}"' if html_body else f'content:"{escape(text_to_html(body))}"'
 
     # No `send newMsg` here — the outgoing message stays in Drafts.
     script = f'''tell application "Microsoft Outlook"
@@ -772,6 +786,8 @@ async def send_draft(draft_id: str) -> str:
     draft_id = draft_id.strip()
     script = f'''tell application "Microsoft Outlook"
     set m to message id {draft_id}
+    if class of m is not outgoing message then error "Message " & {draft_id} & " is not a draft (not an outgoing message)."
+    if was sent of m then error "Message " & {draft_id} & " has already been sent; it is not a draft."
     set msubject to subject of m
     set mto to ""
     try
@@ -1226,11 +1242,19 @@ async def move_email(
     if err := _bad_message_id(entry_id):
         return err
     entry_id = entry_id.strip()
+    # Custom folder names are looked up by name across all accounts; refuse a
+    # match in another account so a same-named folder in a shared/co-owned
+    # account can never receive this message. Built-in folders are unchanged.
+    account_check = "" if is_builtin_folder(target_folder) else (
+        f'''
+    set destFolder to {dest_ref}
+    if (id of account of destFolder) is not (id of account of m) or (class of account of destFolder) is not (class of account of m) then error "Folder {escape(target_folder)} belongs to a different account than the message; not moved."'''
+    )
     script = f'''tell application "Microsoft Outlook"
     set m to message id {entry_id}
-    set msubject to subject of m
+    set msubject to subject of m{account_check}
     move m to {dest_ref}
-    return msubject
+    return my sf(msubject)
 end tell'''
 
     try:
@@ -1273,7 +1297,7 @@ async def reply_email(
     set m to message id {entry_id}
     set msubject to subject of m
     set replyMsg to {reply_cmd} m
-    set content of replyMsg to "{escape(body)}" & return & return & content of replyMsg
+    set content of replyMsg to "{escape(text_to_html(body))}<br><br>" & content of replyMsg
     send replyMsg
     return msubject
 end tell'''
@@ -1358,12 +1382,12 @@ async def create_draft_reply(
     reply_cmd = "reply all to" if reply_all else "reply to"
     if html_body:
         content_line = (
-            f'set html content of replyMsg to "{escape(html_body)}<br><br>" '
-            f'& html content of replyMsg'
+            f'set content of replyMsg to "{escape(html_body)}<br><br>" '
+            f'& content of replyMsg'
         )
     else:
         content_line = (
-            f'set content of replyMsg to "{escape(body)}" & return & return '
+            f'set content of replyMsg to "{escape(text_to_html(body))}<br><br>" '
             f'& content of replyMsg'
         )
 
@@ -1945,7 +1969,7 @@ async def create_event(
     if location:
         props += f', location:"{escape(location)}"'
     if body:
-        props += f', content:"{escape(body)}"'
+        props += f', content:"{escape(text_to_html(body))}"'
     if all_day:
         props += ', all day flag:true'
 
@@ -2010,7 +2034,7 @@ async def create_meeting(
     if location:
         props += f', location:"{escape(location)}"'
     if body:
-        props += f', content:"{escape(body)}"'
+        props += f', content:"{escape(text_to_html(body))}"'
 
     attendee_lines = ""
     for addr in required_attendees.split(";"):
@@ -2077,7 +2101,7 @@ async def update_event(
     if location:
         set_lines += f'set location of e to "{escape(location)}"\n'
     if body:
-        set_lines += f'set content of e to "{escape(body)}"\n'
+        set_lines += f'set content of e to "{escape(text_to_html(body))}"\n'
 
     if not set_lines:
         return json.dumps({"error": "No fields to update"})
@@ -2464,7 +2488,7 @@ async def create_task(
         due_dt = datetime.fromisoformat(due_date)
         props += f', due date:{format_date(due_dt)}'
     if body:
-        props += f', content:"{escape(body)}"'
+        props += f', content:"{escape(text_to_html(body))}"'
 
     script = f'''tell application "Microsoft Outlook"
     set newTask to make new task with properties {{{props}}}
@@ -2602,65 +2626,62 @@ async def save_attachment(
 ) -> str:
     """Save an attachment from an email to disk.
 
-    Downloads the specified attachment to a local directory.
+    Saves the attachment inside the configured attachment root (default
+    ~/Downloads, or the OUTLOOK_MCP_ATTACHMENT_DIR environment variable).
+    The file name is reduced to a safe single component, existing files are
+    never overwritten (a suffix such as " (1)" is added), and the saved file
+    is marked as downloaded from the internet (com.apple.quarantine).
 
     Args:
         entry_id: The numeric ID of the email containing the attachment.
         attachment_index: Which attachment to save (1-based index). Default 1.
             Use list_attachments to see available indices.
-        save_directory: Directory to save the file to. Default: user's
-            Downloads folder.
+        save_directory: Optional folder inside the attachment root (absolute,
+            or relative to the root). Default: the root itself.
 
     Returns:
-        The full file path where the attachment was saved, or an error.
+        JSON with the saved file name and path, or an error.
     """
-    if not save_directory:
-        save_directory = os.path.join(os.path.expanduser("~"), "Downloads")
-    os.makedirs(save_directory, exist_ok=True)
-
-    # Use POSIX path for AppleScript
-    save_dir_posix = save_directory
-
     if err := _bad_message_id(entry_id):
         return err
     entry_id = entry_id.strip()
-    script = f'''tell application "Microsoft Outlook"
-    set m to message id {entry_id}
-    set attList to attachments of m
-    set attCount to count of attList
-    if attCount < {attachment_index} then return "ERROR:Only " & attCount & " attachment(s), requested index {attachment_index}"
-    set a to item {attachment_index} of attList
-    set aname to name of a
-    set savePath to POSIX file "{escape(save_dir_posix)}/{escape("__PLACEHOLDER__")}"
-    save a in file ((POSIX path of (POSIX file "{escape(save_dir_posix)}")) & aname)
-    return aname
-end tell'''
+    root = attachment_root()
+    target_dir, err = resolve_save_dir(save_directory, root)
+    if err:
+        return err
 
-    # Simpler approach: save to known path
-    script = f'''tell application "Microsoft Outlook"
+    # Step 1: read the attachment's name (chosen by the sender) without saving.
+    name_script = f'''tell application "Microsoft Outlook"
     set m to message id {entry_id}
     set attList to attachments of m
     set attCount to count of attList
     if attCount < {attachment_index} then return "ERROR:Only " & attCount & " attachment(s)"
-    set a to item {attachment_index} of attList
-    set aname to name of a
-    set savePath to "{escape(save_dir_posix)}/" & aname
-    save a in savePath
-    return my sf(aname) & {AS_DELIM} & my sf(savePath)
+    return my sf(name of (item {attachment_index} of attList))
 end tell'''
-
     try:
-        raw = await bridge.run(script)
+        raw = await bridge.run(name_script)
         if raw.startswith("ERROR:"):
             return raw
+        os.makedirs(target_dir, exist_ok=True)
+        save_path = unique_path(target_dir, safe_filename(raw))
+        if not is_within(os.path.realpath(save_path), target_dir):
+            return "Error: Attachment filename would escape the target directory."
 
-        parts = raw.split(DELIM)
-        filename = parts[0].strip() if len(parts) > 0 else "unknown"
-        save_path = os.path.join(save_directory, filename)
+        # Step 2: save to the exact path chosen here, never to a path built
+        # from the sender's attachment name.
+        save_script = f'''tell application "Microsoft Outlook"
+    set m to message id {entry_id}
+    set a to item {attachment_index} of (attachments of m)
+    save a in "{escape(save_path)}"
+end tell'''
+        await bridge.run(save_script)
+        if not os.path.isfile(save_path) or not is_within(os.path.realpath(save_path), target_dir):
+            return f"Error: Outlook did not save the attachment to {save_path}."
         result = {
             "status": "saved",
-            "filename": filename,
+            "filename": os.path.basename(save_path),
             "path": save_path,
+            "marked_as_downloaded": mark_as_downloaded(save_path),
         }
         return json.dumps(result, indent=2, default=str)
     except Exception as e:

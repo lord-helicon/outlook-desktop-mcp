@@ -46,6 +46,15 @@ from outlook_desktop_mcp.utils.formatting import (
     format_task_full,
 )
 from outlook_desktop_mcp.utils.errors import format_com_error
+from outlook_desktop_mcp.utils.attachments import (
+    ATTACHMENT_DIR_ENV,
+    attachment_root,
+    is_within,
+    mark_as_downloaded,
+    resolve_save_dir,
+    safe_filename,
+    unique_path,
+)
 from outlook_desktop_mcp.utils.output import compact_json_tools
 
 # --- Logging (all to stderr, stdout is reserved for MCP JSON-RPC) ---
@@ -2254,63 +2263,12 @@ async def list_attachments(entry_id: str, account: str = "") -> str:
         return f"Error listing attachments: {format_com_error(e)}"
 
 
-_ATTACHMENT_DIR_ENV = "OUTLOOK_MCP_ATTACHMENT_DIR"
-
-
-def _attachment_root() -> str:
-    """Root directory attachments may be saved under (realpath).
-
-    Default ~/Downloads; override with the OUTLOOK_MCP_ATTACHMENT_DIR env var.
-    """
-    root = os.environ.get(_ATTACHMENT_DIR_ENV) or os.path.join(
-        os.path.expanduser("~"), "Downloads"
-    )
-    return os.path.realpath(os.path.expanduser(root))
-
-
-def _is_within(path: str, root: str) -> bool:
-    """True if realpath ``path`` equals or is inside realpath ``root``."""
-    try:
-        return os.path.commonpath([os.path.normcase(path), os.path.normcase(root)]) == os.path.normcase(root)
-    except ValueError:  # different drives, or mixed absolute/relative
-        return False
-
-
-def _resolve_save_dir(save_directory: str, root: str):
-    """Resolve the caller's save_directory; returns (path, error).
-
-    Empty means the root itself. A relative path is taken relative to the
-    root. The realpath (symlinks resolved) must lie inside the root.
-    """
-    if not save_directory:
-        return root, None
-    candidate = os.path.expanduser(save_directory)
-    if not os.path.isabs(candidate):
-        candidate = os.path.join(root, candidate)
-    resolved = os.path.realpath(candidate)
-    if not _is_within(resolved, root):
-        return None, (
-            f"Error: save_directory must be inside the attachment root '{root}'. "
-            f"Set the {_ATTACHMENT_DIR_ENV} environment variable to change the root."
-        )
-    return resolved, None
-
-
-def _unique_path(directory: str, filename: str) -> str:
-    """Path in ``directory`` for ``filename`` that does not exist yet.
-
-    Appends " (1)", " (2)", ... before the extension rather than overwriting.
-    """
-    path = os.path.join(directory, filename)
-    if not os.path.exists(path):
-        return path
-    stem, ext = os.path.splitext(filename)
-    n = 1
-    while True:
-        path = os.path.join(directory, f"{stem} ({n}){ext}")
-        if not os.path.exists(path):
-            return path
-        n += 1
+# Attachment save rules are shared with the macOS server (utils/attachments.py).
+_ATTACHMENT_DIR_ENV = ATTACHMENT_DIR_ENV
+_attachment_root = attachment_root
+_is_within = is_within
+_resolve_save_dir = resolve_save_dir
+_unique_path = unique_path
 
 
 @mcp.tool()
@@ -2354,12 +2312,7 @@ async def save_attachment(
             return err
         os.makedirs(save_directory, exist_ok=True)
 
-        # Strip path separators and dangerous characters from filename
-        safe_name = os.path.basename(att.FileName)
-        safe_name = re.sub(r'[^\w\.\-_ ]', '_', safe_name)
-        if not safe_name:
-            safe_name = "attachment"
-
+        safe_name = safe_filename(att.FileName)
         save_path = _unique_path(save_directory, safe_name)
 
         # Ensure final path is still inside the intended directory
@@ -2368,11 +2321,13 @@ async def save_attachment(
             return "Error: Attachment filename would escape the target directory."
 
         att.SaveAsFile(save_path)
+        marked = mark_as_downloaded(save_path)  # Mark-of-the-Web (ZoneId=3)
         return json.dumps({
             "status": "saved",
             "filename": os.path.basename(save_path),
             "path": save_path,
             "size": att.Size,
+            "marked_as_downloaded": marked,
         }, indent=2, default=str)
 
     try:

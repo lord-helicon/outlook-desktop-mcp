@@ -10,6 +10,9 @@ on:
 
 jobs:
   publish:
+    # Only publish what is on main. (The branch protection that actually
+    # enforces this lives in the 'main' environment settings on GitHub.)
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: main
     permissions:
