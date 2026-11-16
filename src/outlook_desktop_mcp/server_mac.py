@@ -36,6 +36,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger("outlook_desktop_mcp")
 
+
+def _bad_message_id(message_id: str) -> str | None:
+    """Return an error if message_id is not a plain Outlook numeric id.
+
+    The id is interpolated unquoted into AppleScript (`message id {id}`),
+    so anything other than digits would be evaluated as script.
+    """
+    if not message_id.strip().isdigit():
+        return f"Error: '{message_id}' is not a valid Outlook message id (expected digits)."
+    return None
+
 # --- MCP Server ---
 
 mcp = FastMCP(
@@ -348,11 +359,17 @@ async def save_draft(
     script = f'''tell application "Microsoft Outlook"
     set newMsg to make new outgoing message with properties {{subject:"{escape(subject)}", {content_prop}}}
     {to_lines}{cc_lines}{bcc_lines}
+    return id of newMsg
 end tell'''
 
     try:
-        await bridge.run(script)
-        return f"Draft saved: '{subject}' to {to}"
+        draft_id = await bridge.run(script)
+        return json.dumps({
+            "status": "draft_saved",
+            "entry_id": draft_id.strip(),
+            "subject": subject,
+            "to": to,
+        }, indent=2, default=str)
     except Exception as e:
         return f"Error saving draft: {e}"
 
@@ -491,6 +508,9 @@ async def read_draft(draft_id: str) -> str:
     Returns:
         JSON object with full draft details.
     """
+    if err := _bad_message_id(draft_id):
+        return err
+    draft_id = draft_id.strip()
     script = f'''tell application "Microsoft Outlook"
     set m to message id {draft_id}
     set mid to id of m
@@ -581,6 +601,9 @@ async def send_draft(draft_id: str) -> str:
     Returns:
         JSON object confirming the send, or an error.
     """
+    if err := _bad_message_id(draft_id):
+        return err
+    draft_id = draft_id.strip()
     script = f'''tell application "Microsoft Outlook"
     set m to message id {draft_id}
     set msubject to subject of m
@@ -1088,6 +1111,76 @@ def _folder_listing_pass(level: int, max_depth: int) -> str:
                 end if
             end repeat
         end try'''
+
+
+# =====================================================================
+# TOOL 7B: create_draft_reply  (ported from upstream PR #21)
+# =====================================================================
+
+@mcp.tool()
+async def create_draft_reply(
+    entry_id: str,
+    body: str = "",
+    reply_all: bool = False,
+    html_body: str = "",
+) -> str:
+    """Create a reply draft without sending it.
+
+    Creates a reply or reply-all, puts the supplied text above the original
+    message thread, and saves it to Drafts so the user can review it before
+    sending. This is the safe alternative to reply_email. Send it later with
+    send_draft.
+
+    Args:
+        entry_id: The numeric message ID of the email to reply to.
+        body: Plain-text reply content. Used when html_body is not provided.
+        reply_all: If true, reply to all recipients. Default false.
+        html_body: Optional. HTML-formatted reply content.
+
+    Returns:
+        JSON with status, the draft's entry_id and subject, or an error.
+    """
+    if err := _bad_message_id(entry_id):
+        return err
+    if not body and not html_body:
+        return "Error: Provide body or html_body."
+    entry_id = entry_id.strip()
+
+    reply_cmd = "reply all to" if reply_all else "reply to"
+    if html_body:
+        content_line = (
+            f'set html content of replyMsg to "{escape(html_body)}<br><br>" '
+            f'& html content of replyMsg'
+        )
+    else:
+        content_line = (
+            f'set content of replyMsg to "{escape(body)}" & return & return '
+            f'& content of replyMsg'
+        )
+
+    script = f'''tell application "Microsoft Outlook"
+    set m to message id {entry_id}
+    set originalSubject to subject of m
+    set replyMsg to {reply_cmd} m
+    {content_line}
+    save replyMsg
+    set mid to id of replyMsg
+    return (mid as text) & "{DELIM}" & originalSubject & "{DELIM}" & subject of replyMsg
+end tell'''
+
+    try:
+        raw = await bridge.run(script)
+        parts = raw.split(DELIM) if raw else []
+        return json.dumps({
+            "status": "draft_reply_created",
+            "entry_id": parts[0].strip() if len(parts) > 0 else "",
+            "original_subject": parts[1].strip() if len(parts) > 1 else "",
+            "subject": parts[2].strip() if len(parts) > 2 else "",
+            "reply_all": reply_all,
+            "folder": "Drafts",
+        }, indent=2, default=str)
+    except Exception as e:
+        return f"Error creating draft reply: {e}"
 
 
 # =====================================================================

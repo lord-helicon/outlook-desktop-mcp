@@ -388,7 +388,12 @@ async def save_draft(
         if html_body:
             mail.HTMLBody = html_body
         mail.Save()
-        return f"Draft saved: '{subject}' to {to}"
+        return json.dumps({
+            "status": "draft_saved",
+            "entry_id": mail.EntryID,
+            "subject": subject,
+            "to": to,
+        }, indent=2, default=str)
 
     try:
         return await bridge.call(_save, to, subject, body, cc, bcc, html_body, account)
@@ -580,6 +585,8 @@ async def send_draft(
             item = namespace.GetItemFromID(draft_id)
         if err := _check_item_class(item, _OL_CLASS_MAIL, "mail item"):
             return err
+        if item.Sent:
+            return "Error: Entry ID refers to a message that has already been sent, not a draft."
 
         subject = item.Subject or "(no subject)"
         to = item.To or ""
@@ -914,6 +921,96 @@ async def reply_email(
         return await bridge.call(_reply, entry_id, body, reply_all, account)
     except Exception as e:
         return f"Error replying to email: {format_com_error(e)}"
+
+
+_OL_FORMAT_HTML = 2
+_BODY_OPEN_TAG = re.compile(r"<body\b[^>]*>", re.IGNORECASE)
+
+
+def _prepend_html(fragment: str, html_doc: str) -> str:
+    """Insert an HTML fragment at the top of an HTML document's <body>.
+
+    Prepending in front of the whole string would put the fragment before
+    <html>/<head>, which Outlook may render oddly or drop entirely.
+    """
+    match = _BODY_OPEN_TAG.search(html_doc)
+    if not match:
+        return fragment + html_doc
+    return html_doc[:match.end()] + fragment + html_doc[match.end():]
+
+
+def _text_to_html(text: str) -> str:
+    import html
+    return html.escape(text).replace("\r\n", "\n").replace("\n", "<br>")
+
+
+# =====================================================================
+# TOOL 7B: create_draft_reply  (ported from upstream PR #21)
+# =====================================================================
+
+@mcp.tool()
+async def create_draft_reply(
+    entry_id: str,
+    body: str = "",
+    reply_all: bool = False,
+    html_body: str = "",
+    account: str = "",
+) -> str:
+    """Create a reply draft without sending it.
+
+    Creates a reply or reply-all, puts the supplied text above the original
+    message thread, and saves it to Drafts so the user can review it before
+    sending. This is the safe alternative to reply_email. Send it later with
+    send_draft.
+
+    Args:
+        entry_id: The unique Outlook EntryID of the email to reply to.
+        body: Plain-text reply content. Used when html_body is not provided.
+        reply_all: If true, reply to all recipients (sender + all CC/To).
+            If false (default), reply only to the sender.
+        html_body: Optional. HTML-formatted reply content to place above the
+            original message.
+        account: Optional. Account display name (or substring). Only needed
+            if entry_id is ambiguous across stores.
+
+    Returns:
+        JSON with status, the draft's entry_id, subject, and recipients,
+        or an error.
+    """
+    def _draft_reply(outlook, namespace, entry_id, body, reply_all, html_body, account):
+        if not body and not html_body:
+            return "Error: Provide body or html_body."
+        if account:
+            store = _require_store(namespace, account)
+            item = namespace.GetItemFromID(entry_id, store.StoreID)
+        else:
+            item = namespace.GetItemFromID(entry_id)
+        if err := _check_item_class(item, _OL_CLASS_MAIL, "mail item"):
+            return err
+        original_subject = item.Subject
+        reply_item = item.ReplyAll() if reply_all else item.Reply()
+        if html_body or reply_item.BodyFormat == _OL_FORMAT_HTML:
+            # Keep the thread's HTML formatting intact.
+            fragment = html_body or _text_to_html(body)
+            reply_item.HTMLBody = _prepend_html(fragment + "<br><br>", reply_item.HTMLBody)
+        else:
+            reply_item.Body = body + "\n\n" + reply_item.Body
+        reply_item.Save()
+        return json.dumps({
+            "status": "draft_reply_created",
+            "entry_id": reply_item.EntryID,
+            "original_subject": original_subject,
+            "subject": reply_item.Subject,
+            "to": reply_item.To,
+            "cc": reply_item.CC,
+            "reply_all": reply_all,
+            "folder": "Drafts",
+        }, indent=2, default=str)
+
+    try:
+        return await bridge.call(_draft_reply, entry_id, body, reply_all, html_body, account)
+    except Exception as e:
+        return f"Error creating draft reply: {format_com_error(e)}"
 
 
 # =====================================================================
