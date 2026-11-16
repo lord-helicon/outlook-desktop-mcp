@@ -38,10 +38,13 @@ class Fake:
     """Fake bridge: `accounts` answers the account-count script; `handler`
     (if given) answers everything else, otherwise `out`."""
 
-    def __init__(self, accounts="1", out="", handler=None):
+    def __init__(self, accounts="1", out="", handler=None, folder="Inbox; 0 unread messages"):
         self.accounts, self.out, self.handler, self.scripts = accounts, out, handler, []
+        self.folder = folder
 
     async def run(self, script, timeout=None):
+        if "outline 1 of scroll area 1" in script:
+            return self.folder  # sidebar folder check
         self.scripts.append(script)
         if "count of exchange accounts" in script:
             return self.accounts
@@ -197,11 +200,28 @@ def test_inbox_search_via_window():
     check("read_email by subject reads the matching row", res.get("entry_id", "").startswith("ui-1-"), str(res)[:150])
 
 
+def test_wrong_folder_and_has_files():
+    print("--- window shows another folder -> clear error; 'Has files' = attachment ---")
+    server_mac.bridge = Fake(accounts="0", handler=ui_handler(), folder="Sent Items; 0 unread messages")
+    out = call(server_mac.list_emails(count=5))
+    check("list_emails refuses another folder", out.startswith("Error listing emails: The Outlook window shows the folder 'Sent Items'"), out[:120])
+    out = call(server_mac.search_emails(query="x"))
+    check("search_emails refuses another folder", "not the Inbox" in out, out[:120])
+    server_mac.bridge = Fake(accounts="0", handler=ui_handler(), folder="Posteingang; 2 ungelesene Nachrichten")
+    check("German Inbox name accepted", isinstance(json.loads(call(server_mac.list_emails(count=5))), list))
+    server_mac.bridge = Fake(accounts="0", handler=ui_handler(), folder="")
+    check("unreadable sidebar does not block", isinstance(json.loads(call(server_mac.list_emails(count=5))), list))
+    row = "Carol, Contract,    09:00,    Has files,    preview text,"
+    fake = Fake(handler=lambda s: row + RECORD_DELIM if "set rowCount" in s else "")
+    res = call(server_mac._ui_list_messages(fake, 5))
+    check("'Has files' marks an attachment", res and res[0]["has_attachments"] is True, str(res))
+
+
 def test_batched_rows_script():
     print("--- window rows are read in one batched call ---")
     fake = Fake(handler=lambda s: "")
     call(server_mac._ui_list_messages(fake, 5))
-    s = fake.scripts[0]
+    s = next(x for x in fake.scripts if "set rowCount" in x)
     check("batched description read", "description of UI element 1 of rows 1 thru maxRows" in s)
     check("falls back to per-row loop", "if not batched then" in s and "of row i" in s)
 
@@ -230,6 +250,7 @@ if __name__ == "__main__":
     test_task_priority_clean()
     test_friendly_errors()
     test_inbox_search_via_window()
+    test_wrong_folder_and_has_files()
     test_batched_rows_script()
     test_server_version()
     print("=" * 50)
