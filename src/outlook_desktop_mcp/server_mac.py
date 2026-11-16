@@ -166,6 +166,36 @@ UI_ACCESS_DENIED_MESSAGE = (
 )
 
 
+NO_ACCOUNT_NOTE = (
+    "Outlook has no mail account that AppleScript can see, so this tool only "
+    "reads the local 'On My Computer' items. New Outlook keeps Microsoft 365 "
+    "mail, calendars and tasks in the cloud, out of AppleScript's reach. To use "
+    "this tool with that account, switch Outlook to Legacy Outlook."
+)
+
+_ACCOUNT_COUNT_SCRIPT = (
+    'tell application "Microsoft Outlook" to return ((count of exchange accounts) '
+    '+ (count of imap accounts) + (count of pop accounts)) as text'
+)
+
+
+async def _results_json(results: list, what: str) -> str:
+    """JSON for a list result; for an empty one, explain New Outlook if needed.
+
+    In New Outlook, AppleScript sees no account at all, so every list is empty.
+    Returning a bare [] then reads as "your mailbox/calendar is empty". When the
+    list is empty and Outlook reports zero accounts, return a note instead.
+    """
+    if results:
+        return json.dumps(results, indent=2, default=str)
+    try:
+        if (await bridge.run(_ACCOUNT_COUNT_SCRIPT)).strip() == "0":
+            return f"No {what} found. {NO_ACCOUNT_NOTE}"
+    except Exception:
+        pass  # can't tell: fall back to the plain empty list
+    return json.dumps([])
+
+
 def _is_ui_access_denied(error: BaseException) -> bool:
     """True if System Events refused UI scripting (no Accessibility permission).
 
@@ -687,7 +717,7 @@ end tell'''
                     "attachment_count": att_count,
                     "body_preview": preview,
                 })
-        return json.dumps(results, indent=2, default=str)
+        return await _results_json(results, "drafts")
     except Exception as e:
         return f"Error listing drafts: {e}"
 
@@ -992,7 +1022,7 @@ end tell'''
                 # Other UI scraping failures (no window, unknown layout):
                 # keep returning the empty AppleScript result.
 
-        return json.dumps(results, indent=2, default=str)
+        return await _results_json(results, "emails")
     except Exception as e:
         return f"Error listing emails: {e}"
 
@@ -1662,7 +1692,7 @@ end tell'''
     try:
         raw = await _run_with_fallback(fast_script, legacy_script)
         if not raw:
-            return json.dumps([])
+            return await _results_json([], "matching emails")
 
         results = []
         for record in raw.split(RECORD_DELIM):
@@ -1683,7 +1713,7 @@ end tell'''
                 "has_attachments": att_count > 0,
                 "attachment_count": att_count,
             })
-        return json.dumps(results, indent=2, default=str)
+        return await _results_json(results, "matching emails")
     except Exception as e:
         return f"Error searching emails: {e}"
 
@@ -1847,7 +1877,7 @@ end tell'''
     try:
         raw = await _run_with_fallback(fast_script, legacy_script)
         if not raw:
-            return json.dumps([])
+            return await _results_json([], "events")
 
         events = []
         for record in raw.split(RECORD_DELIM):
@@ -1877,7 +1907,7 @@ end tell'''
         filtered.sort(key=lambda pair: pair[0] or datetime.max)
         results = [ev for _, ev in filtered[:count]]
 
-        return json.dumps(results, indent=2, default=str)
+        return await _results_json(results, "events")
     except Exception as e:
         return f"Error listing events: {e}"
 
@@ -2299,7 +2329,7 @@ end tell'''
     try:
         raw = await _run_with_fallback(fast_script, legacy_script)
         if not raw:
-            return json.dumps([])
+            return await _results_json([], "matching events")
 
         results = []
         for record in raw.split(RECORD_DELIM):
@@ -2318,7 +2348,7 @@ end tell'''
                 "organizer": _clean(parts[5]),
                 "all_day": parts[6].strip().lower() == "true",
             })
-        return json.dumps(results, indent=2, default=str)
+        return await _results_json(results, "matching events")
     except Exception as e:
         return f"Error searching events: {e}"
 
@@ -2412,7 +2442,7 @@ end tell'''
     try:
         raw = await _run_with_fallback(fast_script, legacy_script)
         if not raw:
-            return json.dumps([])
+            return await _results_json([], "tasks")
 
         results = []
         for record in raw.split(RECORD_DELIM):
@@ -2429,7 +2459,7 @@ end tell'''
                 "complete": parts[3].strip() == "completed",
                 "priority": parts[4].strip(),
             })
-        return json.dumps(results, indent=2, default=str)
+        return await _results_json(results, "tasks")
     except Exception as e:
         return f"Error listing tasks: {e}"
 
