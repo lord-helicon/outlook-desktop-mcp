@@ -9,10 +9,10 @@ as its first two arguments — the live COM objects that only exist on the
 COM thread.
 
 Reconnect: if a call fails with a COM "server went away" HRESULT (Outlook was
-closed or restarted), the COM thread re-dispatches Outlook.Application and
-retries that call once. Because the call is retried, functions passed to
-bridge.call() should be safe to run twice (they fail before completing when
-the server is gone, so this is normally the case).
+closed or restarted), the COM thread re-dispatches Outlook.Application so the
+next call works. The failed call is not re-run (it may already have sent mail
+or changed data); it raises OutlookReconnectedError with a message telling the
+caller the connection is back.
 
 Timeouts: call() gives up after 60s, but the COM thread is single-threaded and
 cannot be interrupted. A request that timed out while still queued is skipped
@@ -30,14 +30,14 @@ logger = logging.getLogger("outlook_desktop_mcp.com_bridge")
 CALL_TIMEOUT_SECONDS = 60
 
 # HRESULTs meaning the Outlook COM server is gone/disconnected (compared masked
-# to unsigned 32 bits). Only codes where the failed call did not run (or the
-# object was already dead) are listed, so a retry cannot repeat side effects
-# such as sending mail. RPC_E_SERVER_DIED (0x80010007) and RPC_S_CALL_FAILED
-# (0x800706BE) are deliberately excluded: "the call may have executed".
+# to unsigned 32 bits). On these the bridge reconnects; it never re-runs the
+# failed call, so codes where "the call may have executed" are safe to include.
 DISCONNECT_HRESULTS = frozenset({
     0x80010108,  # RPC_E_DISCONNECTED
+    0x80010007,  # RPC_E_SERVER_DIED
     0x80010012,  # RPC_E_SERVER_DIED_DNE
     0x800706BA,  # RPC_S_SERVER_UNAVAILABLE
+    0x800706BE,  # RPC_S_CALL_FAILED
     0x800706BF,  # RPC_S_CALL_FAILED_DNE
     0x800401FD,  # CO_E_OBJNOTCONNECTED
 })
@@ -56,6 +56,10 @@ def _hresults_of(exc, com_error_type):
     for c in candidates:
         if isinstance(c, int):
             yield c & 0xFFFFFFFF
+
+
+class OutlookReconnectedError(ConnectionError):
+    """A call failed because Outlook disconnected; the bridge has reconnected."""
 
 
 class OutlookBridge:
@@ -98,15 +102,34 @@ class OutlookBridge:
         )
 
     def _run_request(self, func, args, kwargs):
-        """Run func on the COM thread; on a disconnect error, reconnect and retry once."""
+        """Run func on the COM thread; on a disconnect error, reconnect.
+
+        The failed call is NOT re-run: the disconnect may have come after a
+        side effect (e.g. mail.Send() went through, then reading a property
+        failed), and re-running would repeat it. The caller gets
+        OutlookReconnectedError instead, and the next call uses the new
+        connection.
+        """
         try:
             return func(self._outlook, self._namespace, *args, **kwargs)
         except Exception as e:
             if not self._is_disconnect(e):
                 raise
             logger.warning("Outlook COM disconnected (%s); reconnecting", e)
-            self._connect()  # if this raises, it propagates to the caller
-            return func(self._outlook, self._namespace, *args, **kwargs)
+            try:
+                self._connect()
+            except Exception as reconnect_error:
+                raise ConnectionError(
+                    "Lost the connection to Outlook and could not reconnect. "
+                    "Is Outlook Desktop (Classic) running?"
+                ) from reconnect_error
+            raise OutlookReconnectedError(
+                "Outlook was restarted or disconnected during this operation. "
+                "The connection has been restored, but the operation was not "
+                "retried because it may have partly run. Check its result "
+                "(e.g. Sent Items) before retrying anything that sends or "
+                "changes data; reads can simply be retried."
+            ) from e
 
     def _com_thread_main(self):
         """Main loop for the COM thread."""

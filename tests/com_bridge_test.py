@@ -88,35 +88,76 @@ async def main():
     check("normal call dispatches once", dispatch_count == 1)
     b.stop()
 
-    # 2. Reconnect and retry on disconnect (signed negative HRESULT)
+    # 2. Disconnect: reconnect, do NOT re-run the call, explain to the caller
     b = new_bridge()
     calls = []
 
-    def flaky(o, n):
+    def sends_then_fails(o, n):
         calls.append(n.gen)
-        if len(calls) == 1:
-            raise FakeComError(-2147417848, "disconnected", None, None)  # 0x80010108
-        return "ok"
+        # e.g. mail.Send() went through, then reading a property failed
+        raise FakeComError(-2147417848, "disconnected", None, None)  # 0x80010108
 
-    r = await b.call(flaky)
-    check("retry returns result", r == "ok")
-    check("retry used a fresh connection", calls == [1, 2])
+    try:
+        await b.call(sends_then_fails)
+        check("disconnect raises OutlookReconnectedError", False)
+    except com_bridge.OutlookReconnectedError as e:
+        check("disconnect raises OutlookReconnectedError", True)
+        check("message says connection restored, not retried",
+              "restored" in str(e) and "not retried" in str(e))
+    check("failed call ran exactly once (no duplicate side effects)", calls == [1])
     check("re-dispatched exactly once", dispatch_count == 2)
     r = await b.call(lambda o, n: n.gen)
-    check("subsequent calls use new connection", r == 2)
+    check("next call uses the new connection", r == 2)
     b.stop()
 
-    # 2b. HRESULT carried in excepinfo scode
+    # 2b. HRESULT carried in excepinfo scode also triggers reconnect
     b = new_bridge()
-    n = []
 
-    def flaky2(o, ns):
-        n.append(1)
-        if len(n) == 1:
-            raise FakeComError(-2147352567, "ex", (0, None, None, None, 0, 0x800706BA), None)
-        return "ok2"
+    def scode_fail(o, ns):
+        raise FakeComError(-2147352567, "ex", (0, None, None, None, 0, 0x800706BA), None)
 
-    check("scode in excepinfo triggers reconnect", await b.call(flaky2) == "ok2")
+    try:
+        await b.call(scode_fail)
+        check("scode in excepinfo triggers reconnect", False)
+    except com_bridge.OutlookReconnectedError:
+        check("scode in excepinfo triggers reconnect", dispatch_count == 2)
+    b.stop()
+
+    # 2c. "Call may have executed" codes reconnect too (safe: no re-run)
+    b = new_bridge()
+    calls = []
+
+    def died(o, ns):
+        calls.append(1)
+        raise FakeComError(0x80010007, "server died", None, None)  # RPC_E_SERVER_DIED
+
+    try:
+        await b.call(died)
+    except com_bridge.OutlookReconnectedError:
+        pass
+    check("RPC_E_SERVER_DIED reconnects without re-running", calls == [1] and dispatch_count == 2)
+    b.stop()
+
+    # 2d. Reconnect itself fails -> ConnectionError with a clear message
+    b = new_bridge()
+    original = win32com_client.Dispatch
+
+    def dispatch_down(prog_id):
+        raise FakeComError(0x800401E3, "Operation unavailable", None, None)
+
+    def gone(o, ns):
+        win32com_client.Dispatch = dispatch_down
+        raise FakeComError(0x800706BA, "gone", None, None)
+
+    try:
+        await b.call(gone)
+        check("failed reconnect raises ConnectionError", False)
+    except com_bridge.OutlookReconnectedError:
+        check("failed reconnect raises ConnectionError", False)
+    except ConnectionError as e:
+        check("failed reconnect raises ConnectionError", "could not reconnect" in str(e))
+    finally:
+        win32com_client.Dispatch = original
     b.stop()
 
     # 3. No retry for other errors
@@ -143,23 +184,6 @@ async def main():
     except ValueError:
         check("non-COM error propagates", True)
     check("no reconnect for non-COM error", dispatch_count == 1)
-    b.stop()
-
-    # 4. Retry at most once
-    b = new_bridge()
-    calls = []
-
-    def always(o, ns):
-        calls.append(1)
-        raise FakeComError(0x800706BA, "gone", None, None)
-
-    try:
-        await b.call(always)
-        check("persistent disconnect propagates", False)
-    except FakeComError:
-        check("persistent disconnect propagates", True)
-    check("function ran exactly twice", len(calls) == 2)
-    check("re-dispatched exactly once", dispatch_count == 2)
     b.stop()
 
     # 5. Abandoned (timed-out) queued request is skipped
