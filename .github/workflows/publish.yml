@@ -1,8 +1,10 @@
 name: Publish to PyPI
 
-# Disabled on push in this fork: it would publish to PyPI under upstream's
-# package name (outlook-desktop-mcp). Only runs when triggered by hand;
-# rename the package in pyproject.toml before ever running it.
+# Publishes the fork as outlook-desktop-mcp-plus. Runs only when triggered by
+# hand (Actions > Publish to PyPI > Run workflow), never on push. Uses PyPI
+# trusted publishing: the project must have this repo, this workflow file
+# (publish.yml) and the "main" environment registered as a (pending)
+# trusted publisher on pypi.org before the first run.
 on:
   workflow_dispatch:
 

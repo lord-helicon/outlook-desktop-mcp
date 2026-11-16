@@ -1,8 +1,10 @@
-# outlook-desktop-mcp
+# outlook-desktop-mcp-plus
 
-[![PyPI](https://img.shields.io/pypi/v/outlook-desktop-mcp)](https://pypi.org/project/outlook-desktop-mcp/)
-[![Python](https://img.shields.io/pypi/pyversions/outlook-desktop-mcp)](https://pypi.org/project/outlook-desktop-mcp/)
+[![PyPI](https://img.shields.io/pypi/v/outlook-desktop-mcp-plus)](https://pypi.org/project/outlook-desktop-mcp-plus/)
+[![Python](https://img.shields.io/pypi/pyversions/outlook-desktop-mcp-plus)](https://pypi.org/project/outlook-desktop-mcp-plus/)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-blue)]()
+
+> Maintained by Alexander Rolli. This is a fork of [outlook-desktop-mcp](https://github.com/Aanerud/outlook-desktop-mcp) by Andreas Martin Aanerud (see [Credits](#credits)). It includes fixes from upstream pull requests that were never merged, along with locale-safe dates, draft tools, New Outlook for Mac support, reconnecting to Outlook after a restart, faster mail listing on Windows, and compact JSON output. It works as a drop-in replacement: the `outlook-desktop-mcp` command and the `outlook_desktop_mcp` Python module keep their names. Uninstall the original package first, since both packages install the `outlook-desktop-mcp` command.
 
 **Turn your running Outlook Desktop into an MCP server.** No Microsoft Graph API, no Entra app registration, no OAuth tokens — just your local Outlook and the authentication you already have.
 
@@ -13,13 +15,13 @@ Any MCP client (Claude Code, Claude Desktop, etc.) can then send emails, manage 
 **1. Install** (requires Python 3.12+):
 
 ```bash
-pip install outlook-desktop-mcp
+pip install outlook-desktop-mcp-plus
 ```
 
 **2. Register with Claude Code:**
 
 ```bash
-claude mcp add outlook-desktop -- outlook-desktop-mcp
+claude mcp add outlook-desktop -- outlook-desktop-mcp-plus
 ```
 
 **3. Open Outlook and start a Claude Code session.** That's it — tools are available immediately.
@@ -29,7 +31,7 @@ claude mcp add outlook-desktop -- outlook-desktop-mcp
 When the server starts, it checks which operating system it is running on and takes one of two paths:
 
 ```
-                        outlook-desktop-mcp starts
+                     outlook-desktop-mcp-plus starts
                                   |
                           sys.platform check
                          /                  \
@@ -79,7 +81,7 @@ You have three options:
 3. **Apply the registry policy** in [`docs/suppress-outlook-oom-prompts.reg`](docs/suppress-outlook-oom-prompts.reg). From an **elevated** PowerShell or Command Prompt (Win+X → *Terminal (Admin)*), run:
 
    ```powershell
-   reg import "C:\path\to\outlook-desktop-mcp\docs\suppress-outlook-oom-prompts.reg"
+   reg import "C:\path\to\outlook-desktop-mcp-plus\docs\suppress-outlook-oom-prompts.reg"
    ```
 
    Then fully quit Outlook (check Task Manager for stray `OUTLOOK.EXE` processes) and reopen it. This writes `AdminSecurityMode=3` and approves all `PromptOOM*` categories under `HKLM\Software\Policies\Microsoft\Office\16.0\Outlook\Security`, which Outlook honors regardless of AV status. On Intune/MDM-managed corporate devices, `HKCU\Software\Policies\...\Outlook` is locked and the HKLM keys may be overwritten on next policy sync — if `reg import` fails or the prompts come back, ask IT to push the equivalent settings via Group Policy.
@@ -214,8 +216,8 @@ Each tool constructs a single AppleScript that fetches all needed data in one `o
 ### Windows (x64)
 
 ```bash
-git clone https://github.com/Aanerud/outlook-desktop-mcp.git
-cd outlook-desktop-mcp
+git clone https://github.com/lord-helicon/outlook-desktop-mcp-plus.git
+cd outlook-desktop-mcp-plus
 python -m venv .venv
 .venv\Scripts\activate
 pip install pywin32 "mcp[cli]" -e .
@@ -225,7 +227,7 @@ python .venv\Scripts\pywin32_postinstall.py -install
 Register from source using the launcher script:
 
 ```bash
-claude mcp add outlook-desktop -- powershell.exe -Command "& 'C:\path\to\outlook-desktop-mcp\outlook-desktop-mcp.cmd' mcp"
+claude mcp add outlook-desktop -- powershell.exe -Command "& 'C:\path\to\outlook-desktop-mcp-plus\outlook-desktop-mcp.cmd' mcp"
 ```
 
 ### Windows (ARM64)
@@ -233,8 +235,8 @@ claude mcp add outlook-desktop -- powershell.exe -Command "& 'C:\path\to\outlook
 The `[cli]` extra of `mcp` transitively pulls in `cryptography`, and pip's default resolver may pick a version that lacks a `win_arm64` wheel — which then fails to build because it requires a Rust toolchain plus OpenSSL. Install without the `cli` extra and force wheels-only resolution:
 
 ```powershell
-git clone https://github.com/Aanerud/outlook-desktop-mcp.git
-cd outlook-desktop-mcp
+git clone https://github.com/lord-helicon/outlook-desktop-mcp-plus.git
+cd outlook-desktop-mcp-plus
 & "C:\Program Files\Python312-arm64\python.exe" -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
@@ -248,14 +250,14 @@ The base `mcp` package is sufficient for running the stdio server — the `[cli]
 Register from source the same way as x64:
 
 ```bash
-claude mcp add outlook-desktop -- powershell.exe -Command "& 'C:\path\to\outlook-desktop-mcp\outlook-desktop-mcp.cmd' mcp"
+claude mcp add outlook-desktop -- powershell.exe -Command "& 'C:\path\to\outlook-desktop-mcp-plus\outlook-desktop-mcp.cmd' mcp"
 ```
 
 ### macOS
 
 ```bash
-git clone https://github.com/Aanerud/outlook-desktop-mcp.git
-cd outlook-desktop-mcp
+git clone https://github.com/lord-helicon/outlook-desktop-mcp-plus.git
+cd outlook-desktop-mcp-plus
 python3 -m venv .venv
 source .venv/bin/activate
 pip install "mcp[cli]" -e .
@@ -264,7 +266,7 @@ pip install "mcp[cli]" -e .
 Register from source:
 
 ```bash
-claude mcp add outlook-desktop -- /path/to/outlook-desktop-mcp/.venv/bin/python -m outlook_desktop_mcp
+claude mcp add outlook-desktop -- /path/to/outlook-desktop-mcp-plus/.venv/bin/python -m outlook_desktop_mcp
 ```
 
 ## Usage Examples
@@ -288,7 +290,7 @@ Windows-only examples:
 
 ## Why Not Microsoft Graph?
 
-| | Microsoft Graph | outlook-desktop-mcp |
+| | Microsoft Graph | outlook-desktop-mcp-plus |
 |---|---|---|
 | Entra app registration | Required | Not needed |
 | Admin consent | Required for mail permissions | Not needed |
@@ -301,7 +303,7 @@ Windows-only examples:
 ## Project Structure
 
 ```
-outlook-desktop-mcp/
+outlook-desktop-mcp-plus/
   src/outlook_desktop_mcp/
     entrypoint.py            # Platform detection → routes to correct server
     server.py                # Windows MCP server (29 tools, COM automation)
@@ -329,6 +331,23 @@ outlook-desktop-mcp/
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the branching strategy and development setup.
 
+## Credits
+
+outlook-desktop-mcp-plus is maintained by **Alexander Rolli**.
+
+It is a fork of [outlook-desktop-mcp](https://github.com/Aanerud/outlook-desktop-mcp), created by **Andreas Martin Aanerud**, who wrote the original Windows (COM) and macOS (AppleScript) server. This fork has been modified since then; the git history records every change.
+
+The fork also includes work from these contributors' pull requests to the original project:
+
+- Martin Wehner: COM error guards when walking folders ([#16](https://github.com/Aanerud/outlook-desktop-mcp/pull/16))
+- Nao179: draft tools ([#23](https://github.com/Aanerud/outlook-desktop-mcp/pull/23))
+- accesstechnology-mike: draft reply, ported from [#21](https://github.com/Aanerud/outlook-desktop-mcp/pull/21)
+- José Ángel Galindo Duarte: locale-safe AppleScript dates ([#25](https://github.com/Aanerud/outlook-desktop-mcp/pull/25))
+- edwadjei: batched AppleScript fetches on macOS ([#34](https://github.com/Aanerud/outlook-desktop-mcp/pull/34))
+- andrey-vk: locale-safe date filters on Windows ([#35](https://github.com/Aanerud/outlook-desktop-mcp/pull/35))
+- Jacob (jfviberg): calendar targeting and the `Move()` fix ([#37](https://github.com/Aanerud/outlook-desktop-mcp/pull/37))
+- joekwong-uk: New Outlook for Mac findings ([issue #29](https://github.com/Aanerud/outlook-desktop-mcp/issues/29))
+
 ## License
 
-See [LICENSE](LICENSE) file.
+GNU Affero General Public License v3.0, the same license as the original project. See the [LICENSE](LICENSE) file.
